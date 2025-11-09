@@ -1,0 +1,16 @@
+# Ignore the virtual environment folder
+network_analysis_project/
+
+# Ignore log files
+*.log
+
+# Ignore IDE configuration files 
+.vscode/
+
+# Ignore SQLite database files
+*.db
+*.sqlite
+*.sqlite3
+
+# Ignore MANUALS
+*.md
