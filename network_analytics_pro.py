@@ -320,6 +320,35 @@ class NetworkDatabase:
         
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_participation_event ON Event_Participation(event_id)')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_participation_actor ON Event_Participation(actor_id)')
+
+        # TABLE 6: Edges/Relationships
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS edges (
+                edge_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                source_actor_id TEXT NOT NULL REFERENCES actors_id(actor_id),
+                target_actor_id TEXT NOT NULL REFERENCES actors_id(actor_id),
+                relationship_type TEXT NOT NULL CHECK(
+                    relationship_type IN (
+                        'kinship', 'trust', 'community', 'informal',
+                        'official', 'mentoring', 'communicative', 'transactional',
+                        'educational', 'conflict'
+                    )
+                ),
+                created_timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                
+                -- Prevent self-loops
+                CHECK(source_actor_id != target_actor_id),
+                
+                -- Prevent exact duplicates
+                UNIQUE(source_actor_id, target_actor_id, relationship_type)
+            )
+        ''')
+        
+        # Indexes for fast lookup
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_edges_source ON edges(source_actor_id)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_edges_target ON edges(target_actor_id)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_edges_type ON edges(relationship_type)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_edges_timestamp ON edges(created_timestamp)')
         
         self.conn.commit()
         logger.info("All database tables initialized")
@@ -491,7 +520,170 @@ class ActorManager:
             logger.error(f"Error updating record status: {e}")
             raise
 
+# ============================================================================
+# PART 2: BUSINESS LOGIC - EDGES MANAGER
+# ============================================================================
 
+class EdgeManager:
+    """Manager for relationship/edge operations"""
+
+    # Valid relationship types
+    RELATIONSHIP_TYPES = [
+        'kinship', 'trust', 'community', 'informal',
+        'official', 'mentoring', 'communicative', 'transactional',
+        'educational', 'conflict'
+    ]
+
+    def __init__(self, db: 'NetworkDatabase'):
+        self.db = db
+
+    def validate_edge(self, source_actor_id: str, target_actor_id: str,
+                     relationship_type: str) -> tuple[bool, str]:
+        """
+        Validate edge creation parameters in sequence
+        Returns: (is_valid, error_message)
+        """
+
+        # Check 1: Verify source_actor_id is populated and valid
+        if not source_actor_id or not source_actor_id.strip():
+            return False, "Error 1: Source actor ID is empty"
+
+        try:
+            query = 'SELECT actor_id FROM actors_id WHERE actor_id = ?'
+            result = self.db.execute_query(query, (source_actor_id,))
+            if not result:
+                return False, f"Error 1: Source actor ID '{source_actor_id}' not found in database"
+        except Exception as e:
+            logger.error(f"Error validating source: {e}")
+            return False, f"Error 1: Database error checking source actor: {str(e)}"
+
+        # Check 2: Verify target_actor_id is populated and valid
+        if not target_actor_id or not target_actor_id.strip():
+            return False, "Error 2: Target actor ID is empty"
+
+        try:
+            result = self.db.execute_query(query, (target_actor_id,))
+            if not result:
+                return False, f"Error 2: Target actor ID '{target_actor_id}' not found in database"
+        except Exception as e:
+            logger.error(f"Error validating target: {e}")
+            return False, f"Error 2: Database error checking target actor: {str(e)}"
+
+        # Check 3: Verify relationship_type is selected
+        if not relationship_type or not relationship_type.strip():
+            return False, "Error 3: Relationship type is not selected"
+
+        if relationship_type not in self.RELATIONSHIP_TYPES:
+            return False, f"Error 3: Invalid relationship type '{relationship_type}'. Must be one of: {', '.join(self.RELATIONSHIP_TYPES)}"
+
+        # Check 4: Prevent self-loops
+        if source_actor_id == target_actor_id:
+            return False, "Error 4: Source and target actor cannot be the same (self-loops not allowed)"
+
+        # Check 5 (optional): Check for duplicate edges
+        try:
+            dup_query = '''
+                SELECT edge_id FROM edges
+                WHERE source_actor_id = ? AND target_actor_id = ? AND relationship_type = ?
+            '''
+            dup_result = self.db.execute_query(dup_query, (source_actor_id, target_actor_id, relationship_type))
+            if dup_result:
+                return False, f"Error 5 (Warning): Duplicate edge already exists. Edge ID: {dict(dup_result[0])['edge_id']}"
+        except Exception as e:
+            logger.warning(f"Could not check for duplicates: {e}")
+            # Don't fail on this check, just warn
+
+        return True, ""
+
+    def create_edge(self, source_actor_id: str, target_actor_id: str,
+                   relationship_type: str) -> int:
+        """Create new edge/relationship, returns edge_id"""
+
+        # Validate first
+        is_valid, error_msg = self.validate_edge(source_actor_id, target_actor_id, relationship_type)
+        if not is_valid:
+            raise ValueError(error_msg)
+
+        query = '''
+            INSERT INTO edges (source_actor_id, target_actor_id, relationship_type)
+            VALUES (?, ?, ?)
+        '''
+
+        try:
+            edge_id = self.db.execute_insert(query, (source_actor_id, target_actor_id, relationship_type))
+            logger.info(f"Created edge: {edge_id} ({source_actor_id} -> {target_actor_id}, type: {relationship_type})")
+            return edge_id
+        except Exception as e:
+            logger.error(f"Error creating edge: {e}")
+            raise
+
+    def get_edge(self, edge_id: int) -> dict | None:
+        """Get edge by ID"""
+        query = 'SELECT * FROM edges WHERE edge_id = ?'
+        result = self.db.execute_query(query, (edge_id,))
+        return dict(result[0]) if result else None
+
+    def get_edges_for_actor(self, actor_id: str, direction: str = 'both') -> list[dict]:
+        """Get all edges for an actor
+
+        direction: 'outgoing' (source), 'incoming' (target), 'both'
+        """
+        if direction == 'outgoing':
+            query = 'SELECT * FROM edges WHERE source_actor_id = ? ORDER BY created_timestamp DESC'
+            results = self.db.execute_query(query, (actor_id,))
+        elif direction == 'incoming':
+            query = 'SELECT * FROM edges WHERE target_actor_id = ? ORDER BY created_timestamp DESC'
+            results = self.db.execute_query(query, (actor_id,))
+        else:  # both
+            query = '''
+                SELECT * FROM edges
+                WHERE source_actor_id = ? OR target_actor_id = ?
+                ORDER BY created_timestamp DESC
+            '''
+            results = self.db.execute_query(query, (actor_id, actor_id))
+
+        return [dict(row) for row in results]
+
+    def get_all_edges(self, relationship_type: str = None, limit: int = None,
+                     offset: int = 0) -> list[dict]:
+        """Get all edges with optional filtering and pagination"""
+
+        if relationship_type:
+            query = 'SELECT * FROM edges WHERE relationship_type = ?'
+            params = (relationship_type,)
+        else:
+            query = 'SELECT * FROM edges'
+            params = ()
+
+        query += ' ORDER BY created_timestamp DESC'
+
+        if limit:
+            query += f' LIMIT {limit} OFFSET {offset}'
+
+        results = self.db.execute_query(query, params)
+        return [dict(row) for row in results]
+
+    def delete_edge(self, edge_id: int) -> bool:
+        """Delete edge by ID"""
+        query = 'DELETE FROM edges WHERE edge_id = ?'
+        try:
+            self.db.execute_insert(query, (edge_id,))
+            logger.info(f"Deleted edge: {edge_id}")
+            return True
+        except Exception as e:
+            logger.error(f"Error deleting edge: {e}")
+            raise
+
+    def get_edge_count(self, relationship_type: str = None) -> int:
+        """Get count of edges, optionally filtered by type"""
+        if relationship_type:
+            query = 'SELECT COUNT(*) as cnt FROM edges WHERE relationship_type = ?'
+            result = self.db.execute_query(query, (relationship_type,))
+        else:
+            query = 'SELECT COUNT(*) as cnt FROM edges'
+            result = self.db.execute_query(query)
+
+        return dict(result[0])['cnt'] if result else 0
 
 
 # ============================================================================
@@ -701,6 +893,184 @@ class NameLookupEngine:
 # ============================================================================
 # LAYER 3: GUI - MAIN APPLICATION
 # ============================================================================
+
+
+class SelectActorModal(tk.Toplevel):
+    """Modal dialog for selecting actor by name or UUID"""
+
+    def __init__(self, parent, name_lookup: 'NameLookupEngine', actor_manager: 'ActorManager',
+                 db: 'NetworkDatabase', title: str = "Select Actor"):
+        super().__init__(parent)
+        self.title(title)
+        self.geometry("800x600")
+        self.name_lookup = name_lookup
+        self.actor_manager = actor_manager
+        self.db = db
+        self.selected_actor_id = None
+        self.selected_actor_name = None
+
+        # Make modal
+        self.transient(parent)
+        self.grab_set()
+
+        self.create_ui()
+        self.focus()
+
+    def create_ui(self):
+        """Create modal UI"""
+
+        # Search frame
+        search_frame = ttk.LabelFrame(self, text="🔍 Search for Actor", padding=10)
+        search_frame.pack(fill=tk.X, padx=10, pady=10)
+
+        ttk.Label(search_frame, text="Enter actor name or UUID:").pack()
+
+        input_frame = ttk.Frame(search_frame)
+        input_frame.pack(fill=tk.X, pady=10)
+
+        self.search_entry = ttk.Entry(input_frame, width=60)
+        self.search_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self.search_entry.bind('<Return>', lambda e: self.execute_search())
+
+        ttk.Button(input_frame, text="Search", command=self.execute_search).pack(side=tk.LEFT, padx=5)
+
+        # Results frame
+        results_frame = ttk.LabelFrame(self, text="📋 Search Results", padding=10)
+        results_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+
+        # Results tree
+        self.results_tree = ttk.Treeview(results_frame, columns=('ID', 'Name', 'Aliases', 'Status'),
+                                        height=15, show='tree headings')
+
+        self.results_tree.column('#0', width=0, stretch=tk.NO)
+        self.results_tree.column('ID', anchor=tk.W, width=280)
+        self.results_tree.column('Name', anchor=tk.W, width=200)
+        self.results_tree.column('Aliases', anchor=tk.W, width=150)
+        self.results_tree.column('Status', anchor=tk.W, width=80)
+
+        self.results_tree.heading('ID', text='Actor ID (UUID)')
+        self.results_tree.heading('Name', text='Name')
+        self.results_tree.heading('Aliases', text='Aliases')
+        self.results_tree.heading('Status', text='Status')
+
+        scrollbar = ttk.Scrollbar(results_frame, orient='vertical', command=self.results_tree.yview)
+        self.results_tree.configure(yscroll=scrollbar.set)
+
+        self.results_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        # Bind selection
+        self.results_tree.bind('<<TreeviewSelect>>', self.on_result_selected)
+
+        # Info frame
+        self.info_frame = ttk.LabelFrame(self, text="ℹ️ Selected Actor Info", padding=10)
+        self.info_frame.pack(fill=tk.X, padx=10, pady=10)
+
+        self.info_label = ttk.Label(self.info_frame, text="No actor selected")
+        self.info_label.pack()
+
+        # Action buttons
+        button_frame = ttk.Frame(self)
+        button_frame.pack(fill=tk.X, padx=10, pady=10)
+
+        ttk.Button(button_frame, text="✓ Select", command=self.confirm_selection).pack(side=tk.LEFT, padx=5)
+        ttk.Button(button_frame, text="➕ Create New Actor", command=self.create_new_actor).pack(side=tk.LEFT, padx=5)
+        ttk.Button(button_frame, text="✕ Cancel", command=self.cancel).pack(side=tk.RIGHT, padx=5)
+
+    def execute_search(self):
+        """Execute name lookup"""
+        search_term = self.search_entry.get().strip()
+
+        if not search_term:
+            messagebox.showwarning("Empty Search", "Please enter a name or UUID")
+            return
+
+        # Clear results
+        for item in self.results_tree.get_children():
+            self.results_tree.delete(item)
+
+        try:
+            # Try UUID lookup first
+            if len(search_term) == 36 and search_term.count('-') == 4:
+                actor_info = self.actor_manager.get_actor_id_info(search_term)
+                if actor_info:
+                    self.display_results([actor_info])
+                    return
+
+            # Try name lookup
+            result = self.name_lookup.find_actor_by_name(search_term)
+
+            if result.status == 'found':
+                actor_info = self.actor_manager.get_actor_id_info(result.actor_id)
+                self.display_results([actor_info])
+
+            elif result.status == 'ambiguous':
+                # Display candidates
+                candidates = result.candidates
+                self.display_results(candidates)
+
+            else:  # not_found
+                messagebox.showinfo("Not Found", f"No actor found: {result.message}")
+
+        except Exception as e:
+            logger.error(f"Search error: {e}")
+            messagebox.showerror("Search Error", str(e))
+
+    def display_results(self, results: list[dict]):
+        """Display search results in tree"""
+        for i, actor in enumerate(results[:50]):  # Limit to 50 results
+            actor_id = actor.get('actor_id', '')
+
+            # Get display name
+            name_fields = ['name_zh_prc', 'name_ru', 'name_zh_hk', 'name_en']
+            name = next((actor.get(f) for f in name_fields if actor.get(f)), "Unknown")
+
+            # Get aliases
+            aliases_result = self.db.execute_query(
+                'SELECT COUNT(*) as cnt FROM Actor_Aliases WHERE actor_id = ?',
+                (actor_id,)
+            )
+            alias_count = dict(aliases_result[0])['cnt'] if aliases_result else 0
+
+            status = actor.get('verification_status', 'unknown')
+
+            self.results_tree.insert('', 'end', iid=f"result_{i}",
+                                    values=(actor_id, name, f"{alias_count} aliases", status))
+
+    def on_result_selected(self, event):
+        """Handle result selection"""
+        selection = self.results_tree.selection()
+        if not selection:
+            return
+
+        item_id = selection[0]
+        values = self.results_tree.item(item_id, 'values')
+
+        self.selected_actor_id = values[0]
+        self.selected_actor_name = values[1]
+
+        # Show actor info
+        info_text = f"Selected: {self.selected_actor_name} (ID: {self.selected_actor_id})"
+        self.info_label.config(text=info_text)
+
+    def confirm_selection(self):
+        """Confirm and close modal"""
+        if not self.selected_actor_id:
+            messagebox.showwarning("No Selection", "Please select an actor from results")
+            return
+
+        self.destroy()
+
+    def create_new_actor(self):
+        """Open create new actor dialog"""
+        # This would open CreateActorIDDialog
+        messagebox.showinfo("Create New", "Switch to 'Create New Actor ID' tab to add new actor")
+
+    def cancel(self):
+        """Cancel and close modal"""
+        self.selected_actor_id = None
+        self.selected_actor_name = None
+        self.destroy()
 
 class ActorsBiographicalTab:
     """Complete implementation of 'Actors Biographical' tab"""
@@ -1405,6 +1775,334 @@ class ActorsBiographicalTab:
             messagebox.showerror("Error", str(e))
 
 
+# ============================================================================
+# PART 4: EDGES/RELATIONSHIPS TAB UI
+# ============================================================================
+
+class EdgesTab:
+    """Complete implementation of 'Edges/Relationships' tab"""
+
+    RELATIONSHIP_TYPES = [
+        'kinship', 'trust', 'community', 'informal',
+        'official', 'mentoring', 'communicative', 'transactional',
+        'educational', 'conflict'
+    ]
+
+    def __init__(self, parent_frame, edge_manager, actor_manager, name_lookup,
+                 session, db):
+        """Initialize Edges tab"""
+        self.edge_manager = edge_manager
+        self.actor_manager = actor_manager
+        self.name_lookup = name_lookup
+        self.session = session
+        self.db = db
+        self.parent = parent_frame
+
+        # Track current edge being created
+        self.current_source_actor_id = None
+        self.current_source_actor_name = None
+        self.current_target_actor_id = None
+        self.current_target_actor_name = None
+
+        self.create_ui()
+        logger.info("Edges tab initialized")
+
+    def create_ui(self):
+        """Create complete UI for edges tab"""
+
+        # Main container
+        main_frame = ttk.Frame(self.parent)
+        main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+
+        # ====== FIELD 1: SOURCE ACTOR SECTION ======
+        source_frame = ttk.LabelFrame(main_frame, text="📤 Source Actor", padding=10)
+        source_frame.pack(fill=tk.X, pady=10)
+
+        ttk.Label(source_frame, text="Source Actor ID:").grid(row=0, column=0, sticky=tk.W)
+        self.source_id_display = ttk.Label(source_frame, text="None", relief=tk.SUNKEN,
+                                           foreground="red", background="#fff0f0")
+        self.source_id_display.grid(row=0, column=1, sticky=tk.EW, padx=10, ipady=5)
+
+        ttk.Label(source_frame, text="Source Actor Name:").grid(row=1, column=0, sticky=tk.W, pady=5)
+        self.source_name_display = ttk.Label(source_frame, text="None", relief=tk.SUNKEN)
+        self.source_name_display.grid(row=1, column=1, sticky=tk.EW, padx=10, ipady=5)
+
+        button_frame1 = ttk.Frame(source_frame)
+        button_frame1.grid(row=0, column=2, rowspan=2, sticky=tk.EW, padx=10)
+        ttk.Button(button_frame1, text="🔄 Change Active",
+                  command=self.change_active_actor).pack(side=tk.TOP, pady=2)
+        ttk.Button(button_frame1, text="🔍 Select Source",
+                  command=self.select_source_actor).pack(side=tk.TOP, pady=2)
+
+        source_frame.columnconfigure(1, weight=1)
+
+        # Auto-populate from session if available
+        self.update_source_from_session()
+
+        # ====== FIELD 2: TARGET ACTOR SECTION ======
+        target_frame = ttk.LabelFrame(main_frame, text="📥 Target Actor", padding=10)
+        target_frame.pack(fill=tk.X, pady=10)
+
+        ttk.Label(target_frame, text="Target Actor ID:").grid(row=0, column=0, sticky=tk.W)
+        self.target_id_display = ttk.Label(target_frame, text="None", relief=tk.SUNKEN,
+                                           foreground="red", background="#fff0f0")
+        self.target_id_display.grid(row=0, column=1, sticky=tk.EW, padx=10, ipady=5)
+
+        ttk.Label(target_frame, text="Target Actor Name:").grid(row=1, column=0, sticky=tk.W, pady=5)
+        self.target_name_display = ttk.Label(target_frame, text="None", relief=tk.SUNKEN)
+        self.target_name_display.grid(row=1, column=1, sticky=tk.EW, padx=10, ipady=5)
+
+        button_frame2 = ttk.Frame(target_frame)
+        button_frame2.grid(row=0, column=2, rowspan=2, sticky=tk.EW, padx=10)
+        ttk.Button(button_frame2, text="🔍 Select Target",
+                  command=self.select_target_actor).pack(side=tk.TOP, pady=2)
+
+        target_frame.columnconfigure(1, weight=1)
+
+        # ====== FIELD 3: RELATIONSHIP TYPE SECTION ======
+        type_frame = ttk.LabelFrame(main_frame, text="🔗 Relationship Type", padding=10)
+        type_frame.pack(fill=tk.X, pady=10)
+
+        ttk.Label(type_frame, text="Select relationship type:").grid(row=0, column=0, sticky=tk.W)
+        self.relationship_type_var = tk.StringVar()
+        type_combo = ttk.Combobox(type_frame, textvariable=self.relationship_type_var,
+                                  values=self.RELATIONSHIP_TYPES, state='readonly', width=30)
+        type_combo.grid(row=0, column=1, sticky=tk.EW, padx=10, ipady=5)
+
+        # Type descriptions
+        descriptions = {
+            'kinship': 'Family relations',
+            'trust': 'Trust-based relationships',
+            'community': 'Shared community/group membership',
+            'informal': 'Informal connections',
+            'official': 'Official hierarchical relationships',
+            'mentoring': 'Mentor-mentee relationships',
+            'communicative': 'Direct communication channels',
+            'transactional': 'Business/financial transactions',
+            'educational': 'Education/training relationships',
+            'conflict': 'Adversarial relationships'
+        }
+
+        self.type_description_label = ttk.Label(type_frame, text="", foreground="gray")
+        self.type_description_label.grid(row=1, column=0, columnspan=2, sticky=tk.W, pady=5)
+
+        def on_type_change(event=None):
+            selected = self.relationship_type_var.get()
+            desc = descriptions.get(selected, "")
+            self.type_description_label.config(text=f"ℹ️ {desc}")
+
+        type_combo.bind('<<ComboboxSelected>>', on_type_change)
+
+        type_frame.columnconfigure(1, weight=1)
+
+        # ====== FIELD 4: ACTION BUTTONS ======
+        action_frame = ttk.LabelFrame(main_frame, text="⚙️ Actions", padding=10)
+        action_frame.pack(fill=tk.X, pady=10)
+
+        button_container = ttk.Frame(action_frame)
+        button_container.pack(fill=tk.X)
+
+        ttk.Button(button_container, text="💾 Save Edge",
+                  command=self.save_edge).pack(side=tk.LEFT, padx=5)
+        ttk.Button(button_container, text="🗑️ Reset",
+                  command=self.reset_form).pack(side=tk.LEFT, padx=5)
+        ttk.Button(button_container, text="📊 View Edges",
+                  command=self.view_edges).pack(side=tk.LEFT, padx=5)
+
+        # ====== EDGES LIST (Paginated Table) ======
+        list_frame = ttk.LabelFrame(main_frame, text="📋 Recent Edges", padding=10)
+        list_frame.pack(fill=tk.BOTH, expand=True, pady=10)
+
+        self.edges_tree = ttk.Treeview(list_frame,
+                                       columns=('ID', 'Source', 'Target', 'Type', 'Date'),
+                                       height=10, show='tree headings')
+
+        self.edges_tree.column('#0', width=0, stretch=tk.NO)
+        self.edges_tree.column('ID', anchor=tk.CENTER, width=60)
+        self.edges_tree.column('Source', anchor=tk.W, width=200)
+        self.edges_tree.column('Target', anchor=tk.W, width=200)
+        self.edges_tree.column('Type', anchor=tk.W, width=120)
+        self.edges_tree.column('Date', anchor=tk.CENTER, width=140)
+
+        self.edges_tree.heading('ID', text='Edge ID')
+        self.edges_tree.heading('Source', text='Source Actor')
+        self.edges_tree.heading('Target', text='Target Actor')
+        self.edges_tree.heading('Type', text='Relationship Type')
+        self.edges_tree.heading('Date', text='Created')
+
+        scrollbar = ttk.Scrollbar(list_frame, orient='vertical', command=self.edges_tree.yview)
+        self.edges_tree.configure(yscroll=scrollbar.set)
+
+        self.edges_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        # Bind right-click delete
+        self.edges_tree.bind('<Button-3>', self.on_edge_right_click)
+
+        # Pagination controls
+        pagination_frame = ttk.Frame(main_frame)
+        pagination_frame.pack(fill=tk.X, pady=10)
+
+        ttk.Button(pagination_frame, text="🔄 Refresh List",
+                  command=self.refresh_edges_list).pack(side=tk.LEFT, padx=5)
+
+        self.edges_count_label = ttk.Label(pagination_frame, text="Total edges: 0")
+        self.edges_count_label.pack(side=tk.RIGHT, padx=5)
+
+        # Initial load
+        self.refresh_edges_list()
+
+    # ====== HELPER METHODS ======
+
+    def update_source_from_session(self):
+        """Auto-populate source from active actor in session"""
+        if self.session.active_actor_id:
+            self.current_source_actor_id = self.session.active_actor_id
+            actor_info = self.actor_manager.get_actor_id_info(self.session.active_actor_id)
+            if actor_info:
+                name_fields = ['name_zh_prc', 'name_ru', 'name_zh_hk', 'name_en']
+                name = next((actor_info.get(f) for f in name_fields if actor_info.get(f)), "Unknown")
+                self.current_source_actor_name = name
+
+            self.source_id_display.config(text=self.current_source_actor_id[:12] + "...",
+                                         foreground="green")
+            self.source_name_display.config(text=self.current_source_actor_name)
+
+    def change_active_actor(self):
+        """Open modal to change active actor"""
+        modal = SelectActorModal(self.parent, self.name_lookup, self.actor_manager, self.db,
+                                "Change Active Actor")
+        self.parent.wait_window(modal)
+
+        if modal.selected_actor_id:
+            self.session.active_actor_id = modal.selected_actor_id
+            self.update_source_from_session()
+
+    def select_source_actor(self):
+        """Open modal to select source actor"""
+        modal = SelectActorModal(self.parent, self.name_lookup, self.actor_manager, self.db,
+                                "Select Source Actor")
+        self.parent.wait_window(modal)
+
+        if modal.selected_actor_id:
+            self.current_source_actor_id = modal.selected_actor_id
+            self.current_source_actor_name = modal.selected_actor_name
+
+            self.source_id_display.config(text=self.current_source_actor_id[:12] + "...",
+                                         foreground="green")
+            self.source_name_display.config(text=self.current_source_actor_name)
+
+    def select_target_actor(self):
+        """Open modal to select target actor"""
+        modal = SelectActorModal(self.parent, self.name_lookup, self.actor_manager, self.db,
+                                "Select Target Actor")
+        self.parent.wait_window(modal)
+
+        if modal.selected_actor_id:
+            self.current_target_actor_id = modal.selected_actor_id
+            self.current_target_actor_name = modal.selected_actor_name
+
+            self.target_id_display.config(text=self.current_target_actor_id[:12] + "...",
+                                         foreground="green")
+            self.target_name_display.config(text=self.current_target_actor_name)
+
+    def save_edge(self):
+        """Save edge with validation"""
+        try:
+            # Get values
+            source_id = self.current_source_actor_id
+            target_id = self.current_target_actor_id
+            rel_type = self.relationship_type_var.get()
+
+            # Validate
+            is_valid, error_msg = self.edge_manager.validate_edge(source_id, target_id, rel_type)
+
+            if not is_valid:
+                messagebox.showerror("Validation Error", error_msg)
+                return
+
+            # Create edge
+            edge_id = self.edge_manager.create_edge(source_id, target_id, rel_type)
+
+            messagebox.showinfo("Success",
+                              f"✓ Edge created successfully!\nEdge ID: {edge_id}\n\nSource: {self.current_source_actor_name}\nTarget: {self.current_target_actor_name}\nType: {rel_type}")
+
+            logger.info(f"Edge created: {edge_id}")
+
+            # Refresh and reset
+            self.refresh_edges_list()
+            self.reset_form()
+
+        except ValueError as e:
+            messagebox.showerror("Validation Error", str(e))
+        except Exception as e:
+            logger.error(f"Error saving edge: {e}")
+            messagebox.showerror("Error", f"Error saving edge: {str(e)}")
+
+    def reset_form(self):
+        """Clear form fields"""
+        self.current_target_actor_id = None
+        self.current_target_actor_name = None
+
+        self.target_id_display.config(text="None", foreground="red")
+        self.target_name_display.config(text="None")
+        self.relationship_type_var.set("")
+        self.type_description_label.config(text="")
+
+    def refresh_edges_list(self):
+        """Refresh the edges list display"""
+        for item in self.edges_tree.get_children():
+            self.edges_tree.delete(item)
+
+        try:
+            edges = self.edge_manager.get_all_edges(limit=100)
+
+            for i, edge in enumerate(edges):
+                edge_id = edge['edge_id']
+                source_id = edge['source_actor_id']
+                target_id = edge['target_actor_id']
+                rel_type = edge['relationship_type']
+                timestamp = edge['created_timestamp'][:10]  # Date only
+
+                # Get actor names
+                source_info = self.actor_manager.get_actor_id_info(source_id)
+                target_info = self.actor_manager.get_actor_id_info(target_id)
+
+                name_fields = ['name_zh_prc', 'name_ru', 'name_zh_hk', 'name_en']
+                source_name = next((source_info.get(f) for f in name_fields if source_info and source_info.get(f)), source_id[:12])
+                target_name = next((target_info.get(f) for f in name_fields if target_info and target_info.get(f)), target_id[:12])
+
+                self.edges_tree.insert('', 'end', iid=f"edge_{edge_id}",
+                                       values=(edge_id, source_name, target_name, rel_type, timestamp))
+
+            count = self.edge_manager.get_edge_count()
+            self.edges_count_label.config(text=f"Total edges: {count}")
+
+        except Exception as e:
+            logger.error(f"Error refreshing edges: {e}")
+            messagebox.showerror("Error", f"Error loading edges: {str(e)}")
+
+    def on_edge_right_click(self, event):
+        """Handle right-click on edge (delete)"""
+        item = self.edges_tree.selection()[0] if self.edges_tree.selection() else None
+        if not item:
+            return
+
+        if messagebox.askyesno("Delete Edge", "Delete this edge?"):
+            edge_id = int(item.split('_')[1])
+            try:
+                self.edge_manager.delete_edge(edge_id)
+                self.refresh_edges_list()
+                messagebox.showinfo("Deleted", f"Edge {edge_id} deleted")
+            except Exception as e:
+                messagebox.showerror("Error", str(e))
+
+    def view_edges(self):
+        """Show detailed edges viewer window"""
+        # This would open a new window with filtering and sorting options
+        messagebox.showinfo("Edges Viewer", "Advanced viewer - use right-click on edges to delete")
+
+
 
 class NetworkAnalyticsApplication:
     """Main GUI application for network analysis"""
@@ -1419,6 +2117,7 @@ class NetworkAnalyticsApplication:
         self.db = NetworkDatabase(DB_PATH)
         self.actor_manager = ActorManager(self.db)
         self.name_lookup = NameLookupEngine(self.db)
+        self.edge_manager = EdgeManager(self.db)
         self.session = SessionContext()
         
         # Setup UI
@@ -1428,6 +2127,7 @@ class NetworkAnalyticsApplication:
 
         # Initialize bio tab reference (will be set in create_actors_tab)
         self.actors_bio_tab = None
+
         
         logger.info("Application initialized")
     
@@ -1629,13 +2329,24 @@ This actor ID is now ACTIVE for data entry.
             db=self.db
         )
     
+
     def create_edges_tab(self):
-        """Tab 3: Relationships/Edges"""
-        frame = ttk.Frame(self.notebook)
-        self.notebook.add(frame, text="🔗 Edges/Relationships")
+        """Create Tab 3: Edges/Relationships tab"""
+        edges_frame = ttk.Frame(self.notebook)
+        self.notebook.add(edges_frame, text="🔗 Edges/Relationships")
         
-        ttk.Label(frame, text="Edge Management (Implementation in progress)").pack(pady=20)
-    
+        self.edges_tab = EdgesTab(
+            parent_frame=edges_frame,
+            edge_manager=self.edge_manager,
+            actor_manager=self.actor_manager,
+            name_lookup=self.name_lookup,
+            session=self.session,
+            db=self.db
+        )
+        
+        logger.info("Edges tab created")
+
+
     def create_events_tab(self):
         """Tab 4: Events"""
         frame = ttk.Frame(self.notebook)
