@@ -275,13 +275,11 @@ class NetworkDatabase:
         
         # TABLE 4: Events
         cursor.execute('''
-            CREATE TABLE IF NOT EXISTS Events (
+            CREATE TABLE IF NOT EXISTS events (
                 event_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                
-                event_name_ru TEXT NOT NULL,
-                event_name_zh TEXT,
-                event_name_en TEXT,
-                
+                event_title_ru TEXT NOT NULL,
+                event_title_zh TEXT,
+                event_title_en TEXT,
                 event_date DATE NOT NULL,
                 event_date_precision TEXT DEFAULT 'day' CHECK(event_date_precision IN ('day', 'month', 'year', 'unknown')),
                 
@@ -289,7 +287,29 @@ class NetworkDatabase:
                 description_zh TEXT,
                 description_en TEXT,
                 
-                event_type TEXT,
+                -- Level 1: Domain of Origin
+                event_domain TEXT DEFAULT 'unknown' CHECK (event_domain IN (
+                    'politics', 'economics', 'society', 'security',
+                    'technology', 'healthcare', 'culture', 'sports',
+                    'nature', 'unknown'
+                )),
+                
+                -- Level 2: Impact and Nature Type
+                event_type TEXT DEFAULT 'unknown' CHECK (event_type IN (
+                    'trigger', 'process', 'institutional', 'normative',
+                    'symbol_narrative', 'forecast', 'unknown'
+                )),
+                
+                -- Level 3: Geographic Scale
+                event_scale TEXT DEFAULT 'unknown' CHECK (event_scale IN (
+                    'local', 'national', 'regional', 'global', 'unknown'
+                )),
+                
+                -- Level 4: Impact and Importance
+                event_priority TEXT DEFAULT 'unknown' CHECK (event_priority IN (
+                    'strategic', 'tactical', 'noise', 'unknown'
+                )),
+                
                 participants_count INTEGER,
                 
                 sources TEXT NOT NULL,
@@ -297,8 +317,14 @@ class NetworkDatabase:
             )
         ''')
         
-        cursor.execute('CREATE INDEX IF NOT EXISTS idx_events_date ON Events(event_date)')
-        cursor.execute('CREATE INDEX IF NOT EXISTS idx_events_type ON Events(event_type)')
+        # Indexes for performance
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_events_date ON events(event_date)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_events_domain ON events(event_domain)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_events_type ON events(event_type)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_events_scale ON events(event_scale)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_events_priority ON events(event_priority)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_events_precision ON events(event_date_precision)')
+
         
         # TABLE 5: Event_Participation
         cursor.execute('''
@@ -519,6 +545,310 @@ class ActorManager:
         except Exception as e:
             logger.error(f"Error updating record status: {e}")
             raise
+
+
+# ============================================================================
+# PART 2: BUSINESS LOGIC - EVENT MANAGER
+# ============================================================================
+
+class EventManager:
+    """Manager for event operations"""
+    
+    # Constants
+    DOMAINS = ['politics', 'economics', 'society', 'security', 'technology', 
+               'healthcare', 'culture', 'sports', 'nature', 'unknown']
+    
+    TYPES = ['trigger', 'process', 'institutional', 'normative', 
+             'symbol_narrative', 'forecast', 'unknown']
+    
+    SCALES = ['local', 'national', 'regional', 'global', 'unknown']
+    
+    PRIORITIES = ['strategic', 'tactical', 'noise', 'unknown']
+    
+    DATE_PRECISIONS = ['day', 'month', 'year', 'unknown']
+    
+    def __init__(self, db: 'NetworkDatabase'):
+        self.db = db
+    
+    def validate_event(self, event_data: Dict) -> Tuple[bool, str]:
+        """
+        Validate event data before insertion
+        Returns: (is_valid, error_message)
+        """
+        
+        # Required fields
+        if not event_data.get('event_title_ru') or not event_data['event_title_ru'].strip():
+            return False, "Error 1: Russian title is required"
+        
+        if not event_data.get('event_date') or not event_data['event_date'].strip():
+            return False, "Error 2: Event date is required"
+        
+        # Validate date format
+        try:
+            from datetime import datetime
+            datetime.strptime(event_data['event_date'], '%Y-%m-%d')
+        except ValueError:
+            return False, "Error 2: Event date must be in YYYY-MM-DD format"
+        
+        if not event_data.get('sources') or not event_data['sources'].strip():
+            return False, "Error 3: Sources are required"
+        
+        # Validate enumerations
+        precision = event_data.get('event_date_precision', 'day')
+        if precision not in self.DATE_PRECISIONS:
+            return False, f"Error 4: Invalid date precision. Must be one of: {', '.join(self.DATE_PRECISIONS)}"
+        
+        domain = event_data.get('event_domain', 'unknown')
+        if domain not in self.DOMAINS:
+            return False, f"Error 5: Invalid domain. Must be one of: {', '.join(self.DOMAINS)}"
+        
+        event_type = event_data.get('event_type', 'unknown')
+        if event_type not in self.TYPES:
+            return False, f"Error 6: Invalid event type. Must be one of: {', '.join(self.TYPES)}"
+        
+        scale = event_data.get('event_scale', 'unknown')
+        if scale not in self.SCALES:
+            return False, f"Error 7: Invalid scale. Must be one of: {', '.join(self.SCALES)}"
+        
+        priority = event_data.get('event_priority', 'unknown')
+        if priority not in self.PRIORITIES:
+            return False, f"Error 8: Invalid priority. Must be one of: {', '.join(self.PRIORITIES)}"
+        
+        # Validate participants_count if provided
+        if event_data.get('participants_count'):
+            try:
+                int(event_data['participants_count'])
+            except (ValueError, TypeError):
+                return False, "Error 9: Participants count must be an integer"
+        
+        return True, ""
+    
+    def create_event(self, event_data: Dict) -> int:
+        """Create new event, returns event_id"""
+        
+        is_valid, error_msg = self.validate_event(event_data)
+        if not is_valid:
+            raise ValueError(error_msg)
+        
+        query = '''
+            INSERT INTO events (
+                event_title_ru, event_title_zh, event_title_en,
+                event_date, event_date_precision,
+                description_ru, description_zh, description_en,
+                event_domain, event_type, event_scale, event_priority,
+                participants_count, sources
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        '''
+        
+        params = (
+            event_data['event_title_ru'],
+            event_data.get('event_title_zh'),
+            event_data.get('event_title_en'),
+            event_data['event_date'],
+            event_data.get('event_date_precision', 'day'),
+            event_data.get('description_ru'),
+            event_data.get('description_zh'),
+            event_data.get('description_en'),
+            event_data.get('event_domain', 'unknown'),
+            event_data.get('event_type', 'unknown'),
+            event_data.get('event_scale', 'unknown'),
+            event_data.get('event_priority', 'unknown'),
+            event_data.get('participants_count'),
+            event_data['sources']
+        )
+        
+        try:
+            event_id = self.db.execute_insert(query, params)
+            logger.info(f"Created event: {event_id} ({event_data['event_title_ru']})")
+            return event_id
+        except Exception as e:
+            logger.error(f"Error creating event: {e}")
+            raise
+    
+    def update_event(self, event_id: int, event_data: Dict) -> bool:
+        """Update existing event"""
+        
+        is_valid, error_msg = self.validate_event(event_data)
+        if not is_valid:
+            raise ValueError(error_msg)
+        
+        query = '''
+            UPDATE events SET
+                event_title_ru = ?, event_title_zh = ?, event_title_en = ?,
+                event_date = ?, event_date_precision = ?,
+                description_ru = ?, description_zh = ?, description_en = ?,
+                event_domain = ?, event_type = ?, event_scale = ?, event_priority = ?,
+                participants_count = ?, sources = ?
+            WHERE event_id = ?
+        '''
+        
+        params = (
+            event_data['event_title_ru'],
+            event_data.get('event_title_zh'),
+            event_data.get('event_title_en'),
+            event_data['event_date'],
+            event_data.get('event_date_precision', 'day'),
+            event_data.get('description_ru'),
+            event_data.get('description_zh'),
+            event_data.get('description_en'),
+            event_data.get('event_domain', 'unknown'),
+            event_data.get('event_type', 'unknown'),
+            event_data.get('event_scale', 'unknown'),
+            event_data.get('event_priority', 'unknown'),
+            event_data.get('participants_count'),
+            event_data['sources'],
+            event_id
+        )
+        
+        try:
+            self.db.execute_insert(query, params)
+            logger.info(f"Updated event: {event_id}")
+            return True
+        except Exception as e:
+            logger.error(f"Error updating event: {e}")
+            raise
+    
+    def get_event(self, event_id: int) -> Optional[Dict]:
+        """Get event by ID"""
+        query = 'SELECT * FROM events WHERE event_id = ?'
+        result = self.db.execute_query(query, (event_id,))
+        return dict(result[0]) if result else None
+    
+    def get_all_events(self, limit: int = 100, offset: int = 0) -> List[Dict]:
+        """Get all events with pagination"""
+        query = 'SELECT * FROM events ORDER BY event_date DESC, event_id DESC LIMIT ? OFFSET ?'
+        results = self.db.execute_query(query, (limit, offset))
+        return [dict(row) for row in results]
+    
+    def search_events(self, search_term: str = '', filters: Dict = None, 
+                     limit: int = 50, offset: int = 0) -> List[Dict]:
+        """
+        Search events by quick search and/or advanced filters
+        
+        filters dict can contain:
+        - event_date: date string
+        - event_date_precision: 'day', 'month', 'year'
+        - event_domain: domain string
+        - event_type: type string
+        - event_scale: scale string
+        - event_priority: priority string
+        """
+        
+        query = 'SELECT * FROM events WHERE 1=1'
+        params = []
+        
+        # Quick search on titles
+        if search_term.strip():
+            query += ' AND (event_title_ru LIKE ? OR event_title_zh LIKE ? OR event_title_en LIKE ?)'
+            pattern = f'%{search_term}%'
+            params.extend([pattern, pattern, pattern])
+        
+        # Advanced filters
+        if filters:
+            if filters.get('event_date'):
+                query += ' AND event_date = ?'
+                params.append(filters['event_date'])
+            
+            if filters.get('event_date_precision'):
+                query += ' AND event_date_precision = ?'
+                params.append(filters['event_date_precision'])
+            
+            if filters.get('event_domain') and filters['event_domain'] != 'unknown':
+                query += ' AND event_domain = ?'
+                params.append(filters['event_domain'])
+            
+            if filters.get('event_type') and filters['event_type'] != 'unknown':
+                query += ' AND event_type = ?'
+                params.append(filters['event_type'])
+            
+            if filters.get('event_scale') and filters['event_scale'] != 'unknown':
+                query += ' AND event_scale = ?'
+                params.append(filters['event_scale'])
+            
+            if filters.get('event_priority') and filters['event_priority'] != 'unknown':
+                query += ' AND event_priority = ?'
+                params.append(filters['event_priority'])
+        
+        query += ' ORDER BY event_date DESC LIMIT ? OFFSET ?'
+        params.extend([limit, offset])
+        
+        try:
+            results = self.db.execute_query(query, tuple(params))
+            return [dict(row) for row in results]
+        except Exception as e:
+            logger.error(f"Search error: {e}")
+            return []
+    
+    def get_event_count(self) -> int:
+        """Get total event count"""
+        query = 'SELECT COUNT(*) as cnt FROM events'
+        result = self.db.execute_query(query)
+        return dict(result[0])['cnt'] if result else 0
+    
+    def delete_event(self, event_id: int) -> bool:
+        """Delete event by ID"""
+        query = 'DELETE FROM events WHERE event_id = ?'
+        try:
+            self.db.execute_insert(query, (event_id,))
+            logger.info(f"Deleted event: {event_id}")
+            return True
+        except Exception as e:
+            logger.error(f"Error deleting event: {e}")
+            raise
+
+
+class SearchHistoryManager:
+    """Manages persistent search history in JSON"""
+    
+    def __init__(self, history_file: str = 'search_event_history.json'):
+        self.history_file = history_file
+        self.history = self._load_history()
+    
+    def _load_history(self) -> List[Dict]:
+        """Load history from JSON file"""
+        if not os.path.exists(self.history_file):
+            return []
+        
+        try:
+            with open(self.history_file, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                return data if isinstance(data, list) else []
+        except Exception as e:
+            logger.error(f"Error loading search history: {e}")
+            return []
+    
+    def _save_history(self):
+        """Save history to JSON file"""
+        try:
+            with open(self.history_file, 'w', encoding='utf-8') as f:
+                json.dump(self.history, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            logger.error(f"Error saving search history: {e}")
+    
+    def add_search(self, event_data: Dict):
+        """Add event to search history (most recent first)"""
+        entry = {
+            'event_id': event_data.get('event_id'),
+            'event_date': event_data.get('event_date'),
+            'event_title_ru': event_data.get('event_title_ru'),
+            'timestamp': datetime.now().isoformat()
+        }
+        
+        self.history.insert(0, entry)
+        
+        # Keep only last 21 entries
+        self.history = self.history[:21]
+        self._save_history()
+    
+    def get_history(self) -> List[Dict]:
+        """Get search history (most recent first)"""
+        return self.history
+    
+    def clear_history(self):
+        """Clear all history"""
+        self.history = []
+        self._save_history()
+
 
 # ============================================================================
 # PART 2: BUSINESS LOGIC - EDGES MANAGER
@@ -893,6 +1223,234 @@ class NameLookupEngine:
 # ============================================================================
 # LAYER 3: GUI - MAIN APPLICATION
 # ============================================================================
+
+class SearchEventsModal(tk.Toplevel):
+    """Modal dialog for searching and selecting events"""
+    
+    def __init__(self, parent, event_manager: EventManager, 
+                 history_manager: SearchHistoryManager, title: str = "Search Events"):
+        super().__init__(parent)
+        self.title(title)
+        self.geometry("1000x700")
+        self.event_manager = event_manager
+        self.history_manager = history_manager
+        
+        self.selected_event = None
+        self.search_after_id = None
+        
+        # Make modal
+        self.transient(parent)
+        self.grab_set()
+        
+        self.create_ui()
+        self.focus()
+    
+    def create_ui(self):
+        """Create modal UI"""
+        
+        # ===== SEARCH FRAME =====
+        search_frame = ttk.LabelFrame(self, text="🔍 Quick Search", padding=10)
+        search_frame.pack(fill=tk.X, padx=10, pady=10)
+        
+        self.quick_search_var = tk.StringVar()
+        self.quick_search_entry = ttk.Entry(search_frame, textvariable=self.quick_search_var, 
+                                            width=60)
+        self.quick_search_entry.pack(fill=tk.X)
+        self.quick_search_entry.insert(0, "Search by title (RU/ZH/EN)...")
+        
+        # Bind with debounce
+        self.quick_search_var.trace('w', self.on_quick_search_changed)
+        
+        # ===== ADVANCED SEARCH FRAME =====
+        adv_frame = ttk.LabelFrame(self, text="⚙️ Advanced Search", padding=10)
+        adv_frame.pack(fill=tk.X, padx=10, pady=10)
+        
+        # Date row
+        ttk.Label(adv_frame, text="Date (YYYY-MM-DD):").grid(row=0, column=0, sticky=tk.W)
+        self.date_var = tk.StringVar()
+        ttk.Entry(adv_frame, textvariable=self.date_var, width=15).grid(row=0, column=1, padx=5)
+        
+        # Date precision dropdown
+        ttk.Label(adv_frame, text="Precision:").grid(row=0, column=2, sticky=tk.W, padx=(20, 0))
+        self.precision_var = tk.StringVar(value="")
+        ttk.Combobox(adv_frame, textvariable=self.precision_var, 
+                    values=['', 'day', 'month', 'year'], state='readonly', width=12).grid(row=0, column=3, padx=5)
+        
+        # Domain
+        ttk.Label(adv_frame, text="Domain:").grid(row=1, column=0, sticky=tk.W)
+        self.domain_var = tk.StringVar(value="")
+        ttk.Combobox(adv_frame, textvariable=self.domain_var, 
+                    values=[''] + self.event_manager.DOMAINS, state='readonly', width=15).grid(row=1, column=1, padx=5)
+        
+        # Type
+        ttk.Label(adv_frame, text="Type:").grid(row=1, column=2, sticky=tk.W, padx=(20, 0))
+        self.type_var = tk.StringVar(value="")
+        ttk.Combobox(adv_frame, textvariable=self.type_var, 
+                    values=[''] + self.event_manager.TYPES, state='readonly', width=12).grid(row=1, column=3, padx=5)
+        
+        # Scale
+        ttk.Label(adv_frame, text="Scale:").grid(row=2, column=0, sticky=tk.W)
+        self.scale_var = tk.StringVar(value="")
+        ttk.Combobox(adv_frame, textvariable=self.scale_var, 
+                    values=[''] + self.event_manager.SCALES, state='readonly', width=15).grid(row=2, column=1, padx=5)
+        
+        # Priority
+        ttk.Label(adv_frame, text="Priority:").grid(row=2, column=2, sticky=tk.W, padx=(20, 0))
+        self.priority_var = tk.StringVar(value="")
+        ttk.Combobox(adv_frame, textvariable=self.priority_var, 
+                    values=[''] + self.event_manager.PRIORITIES, state='readonly', width=12).grid(row=2, column=3, padx=5)
+        
+        # Reset button
+        ttk.Button(adv_frame, text="🔄 Reset Filters", 
+                  command=self.reset_filters).grid(row=3, column=0, sticky=tk.W, pady=10)
+        
+        # ===== HISTORY FRAME =====
+        hist_frame = ttk.LabelFrame(self, text="📋 Search History (Last 21)", padding=10)
+        hist_frame.pack(fill=tk.X, padx=10, pady=10)
+        
+        self.history_listbox = tk.Listbox(hist_frame, height=4)
+        self.history_listbox.pack(fill=tk.X)
+        self.history_listbox.bind('<<ListboxSelect>>', self.on_history_selected)
+        
+        self.refresh_history()
+        
+        # ===== RESULTS FRAME =====
+        results_frame = ttk.LabelFrame(self, text="📊 Search Results", padding=10)
+        results_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        
+        self.results_tree = ttk.Treeview(results_frame, 
+                                        columns=('ID', 'Date', 'Title (RU)'),
+                                        height=15, show='tree headings')
+        
+        self.results_tree.column('#0', width=0, stretch=tk.NO)
+        self.results_tree.column('ID', anchor=tk.CENTER, width=50)
+        self.results_tree.column('Date', anchor=tk.CENTER, width=100)
+        self.results_tree.column('Title (RU)', anchor=tk.W, width=700)
+        
+        self.results_tree.heading('ID', text='ID')
+        self.results_tree.heading('Date', text='Date')
+        self.results_tree.heading('Title (RU)', text='Title (RU)')
+        
+        scrollbar = ttk.Scrollbar(results_frame, orient='vertical', 
+                                 command=self.results_tree.yview)
+        self.results_tree.configure(yscroll=scrollbar.set)
+        
+        self.results_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        self.results_tree.bind('<Double-1>', lambda e: self.confirm_selection())
+        
+        # ===== ACTION BUTTONS =====
+        button_frame = ttk.Frame(self)
+        button_frame.pack(fill=tk.X, padx=10, pady=10)
+        
+        ttk.Button(button_frame, text="✓ Select", 
+                  command=self.confirm_selection).pack(side=tk.LEFT, padx=5)
+        ttk.Button(button_frame, text="✕ Cancel", 
+                  command=self.cancel).pack(side=tk.RIGHT, padx=5)
+        
+        # Initial search
+        self.execute_search()
+    
+    def on_quick_search_changed(self, *args):
+        """Debounced quick search"""
+        if self.search_after_id:
+            self.after_cancel(self.search_after_id)
+        self.search_after_id = self.after(300, self.execute_search)
+    
+    def execute_search(self):
+        """Execute search with current filters"""
+        search_term = self.quick_search_var.get().strip()
+        if search_term == "Search by title (RU/ZH/EN)...":
+            search_term = ""
+        
+        filters = {}
+        if self.date_var.get().strip():
+            filters['event_date'] = self.date_var.get().strip()
+        if self.precision_var.get():
+            filters['event_date_precision'] = self.precision_var.get()
+        if self.domain_var.get():
+            filters['event_domain'] = self.domain_var.get()
+        if self.type_var.get():
+            filters['event_type'] = self.type_var.get()
+        if self.scale_var.get():
+            filters['event_scale'] = self.scale_var.get()
+        if self.priority_var.get():
+            filters['event_priority'] = self.priority_var.get()
+        
+        # Clear results
+        for item in self.results_tree.get_children():
+            self.results_tree.delete(item)
+        
+        try:
+            results = self.event_manager.search_events(search_term, filters if filters else None)
+            
+            for i, event in enumerate(results[:50]):
+                self.results_tree.insert('', 'end', iid=f"event_{i}",
+                                        values=(event['event_id'], 
+                                               event['event_date'],
+                                               event['event_title_ru']))
+        
+        except Exception as e:
+            logger.error(f"Search error: {e}")
+            messagebox.showerror("Search Error", str(e))
+    
+    def reset_filters(self):
+        """Reset all filters"""
+        self.date_var.set("")
+        self.precision_var.set("")
+        self.domain_var.set("")
+        self.type_var.set("")
+        self.scale_var.set("")
+        self.priority_var.set("")
+        self.execute_search()
+    
+    def refresh_history(self):
+        """Refresh history display"""
+        self.history_listbox.delete(0, tk.END)
+        for entry in self.history_manager.get_history():
+            label = f"{entry['event_date']} - {entry['event_title_ru'][:60]}"
+            self.history_listbox.insert(tk.END, label)
+    
+    def on_history_selected(self, event):
+        """Handle history selection"""
+        selection = self.history_listbox.curselection()
+        if not selection:
+            return
+        
+        history = self.history_manager.get_history()
+        selected_entry = history[selection[0]]
+        
+        event_id = selected_entry['event_id']
+        event = self.event_manager.get_event(event_id)
+        
+        if event:
+            self.selected_event = dict(event)
+            self.confirm_selection()
+    
+    def confirm_selection(self):
+        """Get selected event and close"""
+        selection = self.results_tree.selection()
+        if not selection:
+            messagebox.showwarning("No Selection", "Please select an event")
+            return
+        
+        item_id = selection[0]
+        values = self.results_tree.item(item_id, 'values')
+        
+        event_id = int(values[0])
+        event = self.event_manager.get_event(event_id)
+        
+        if event:
+            self.selected_event = dict(event)
+            self.history_manager.add_search(self.selected_event)
+        
+        self.destroy()
+    
+    def cancel(self):
+        """Cancel and close"""
+        self.selected_event = None
+        self.destroy()
 
 
 class SelectActorModal(tk.Toplevel):
@@ -1775,10 +2333,6 @@ class ActorsBiographicalTab:
             messagebox.showerror("Error", str(e))
 
 
-# ============================================================================
-# PART 4: EDGES/RELATIONSHIPS TAB UI
-# ============================================================================
-
 class EdgesTab:
     """Complete implementation of 'Edges/Relationships' tab"""
 
@@ -2103,6 +2657,292 @@ class EdgesTab:
         messagebox.showinfo("Edges Viewer", "Advanced viewer - use right-click on edges to delete")
 
 
+class EventsTab:
+    """Complete implementation of Events tab"""
+    
+    DOMAINS = ['politics', 'economics', 'society', 'security', 'technology',
+               'healthcare', 'culture', 'sports', 'nature', 'unknown']
+    
+    TYPES = ['trigger', 'process', 'institutional', 'normative',
+             'symbol_narrative', 'forecast', 'unknown']
+    
+    SCALES = ['local', 'national', 'regional', 'global', 'unknown']
+    
+    PRIORITIES = ['strategic', 'tactical', 'noise', 'unknown']
+    
+    PRECISIONS = ['day', 'month', 'year', 'unknown']
+    
+    def __init__(self, parent_frame, event_manager, history_manager, db):
+        """Initialize Events tab"""
+        self.event_manager = event_manager
+        self.history_manager = history_manager
+        self.db = db
+        self.parent = parent_frame
+        
+        self.current_event_id = None
+        self.form_vars = {}
+        
+        self.create_ui()
+        logger.info("Events tab initialized")
+    
+    def create_ui(self):
+        """Create complete UI for events tab"""
+        
+        main_frame = ttk.Frame(self.parent)
+        main_frame.pack(fill=tk.BOTH, expand=True, padx=9, pady=9)
+        
+        # ===== TOP BUTTON =====
+        button_frame = ttk.Frame(main_frame)
+        button_frame.pack(fill=tk.X, pady=(0, 10))
+        
+        ttk.Button(button_frame, text="🔍 Select Event", 
+                  command=self.open_search_dialog).pack(side=tk.LEFT, padx=5)
+        
+        ttk.Button(button_frame, text="🗑️ Clear Form", 
+                  command=self.clear_form).pack(side=tk.LEFT, padx=5)
+        
+        # ===== FORM FIELDS =====
+        form_frame = ttk.Frame(main_frame)
+        form_frame.pack(fill=tk.BOTH, expand=True)
+        
+        # Create scrollable frame for form
+        canvas = tk.Canvas(form_frame, bg='white')
+        scrollbar = ttk.Scrollbar(form_frame, orient='vertical', command=canvas.yview)
+        scrollable_frame = ttk.Frame(canvas)
+        
+        scrollable_frame.bind(
+            "<Configure>",
+            lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+        )
+        
+        canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+
+
+        # Update canvas width when window size changes
+        def on_frame_configure(event):
+            canvas.itemconfig(1, width=event.width)
+        form_frame.bind("<Configure>", on_frame_configure)
+
+        
+        # Row counter for form layout
+        row = 0
+        
+        # ===== EVENT TITLES =====
+        ttk.Label(scrollable_frame, text="Event Title (RU):", font=('', 14, 'bold')).grid(row=row, column=0, sticky=tk.W, padx=10, pady=5)
+        self.form_vars['event_title_ru'] = tk.StringVar()
+        ttk.Entry(scrollable_frame, textvariable=self.form_vars['event_title_ru'], width=80).grid(row=row, column=1, sticky=tk.EW, padx=10)
+        row += 1
+        
+        ttk.Label(scrollable_frame, text="Event Title (ZH):", font=('', 14)).grid(row=row, column=0, sticky=tk.W, padx=10, pady=5)
+        self.form_vars['event_title_zh'] = tk.StringVar()
+        ttk.Entry(scrollable_frame, textvariable=self.form_vars['event_title_zh'], width=80).grid(row=row, column=1, sticky=tk.EW, padx=10)
+        row += 1
+        
+        ttk.Label(scrollable_frame, text="Event Title (EN):", font=('', 14)).grid(row=row, column=0, sticky=tk.W, padx=10, pady=5)
+        self.form_vars['event_title_en'] = tk.StringVar()
+        ttk.Entry(scrollable_frame, textvariable=self.form_vars['event_title_en'], width=80).grid(row=row, column=1, sticky=tk.EW, padx=10)
+        row += 1
+        
+        # ===== EVENT DATE =====
+        ttk.Label(scrollable_frame, text="Event Date (YYYY-MM-DD):", font=('', 14, 'bold')).grid(row=row, column=0, sticky=tk.W, padx=10, pady=5)
+        self.form_vars['event_date'] = tk.StringVar()
+        ttk.Entry(scrollable_frame, textvariable=self.form_vars['event_date'], width=80).grid(row=row, column=1, sticky=tk.EW, padx=10)
+        row += 1
+        
+        ttk.Label(scrollable_frame, text="Date Precision:", font=('', 14)).grid(row=row, column=0, sticky=tk.W, padx=10, pady=5)
+        self.form_vars['event_date_precision'] = tk.StringVar(value='day')
+        ttk.Combobox(scrollable_frame, textvariable=self.form_vars['event_date_precision'], 
+                    values=self.PRECISIONS, state='readonly', width=20).grid(row=row, column=1, sticky=tk.W, padx=10)
+        row += 1
+        
+        # ===== DESCRIPTIONS =====
+        ttk.Separator(scrollable_frame, orient='horizontal').grid(row=row, column=0, columnspan=2, sticky=tk.EW, pady=10)
+        row += 1
+        
+        ttk.Label(scrollable_frame, text="Description (RU):", font=('', 14, 'bold')).grid(row=row, column=0, sticky=tk.NW, padx=10, pady=5)
+        self.form_vars['description_ru'] = tk.StringVar()
+        text_ru = scrolledtext.ScrolledText(scrollable_frame, height=4, width=80, wrap=tk.WORD)
+        text_ru.grid(row=row, column=1, sticky=tk.EW, padx=10, pady=5)
+        self.form_vars['description_ru_widget'] = text_ru
+        row += 1
+        
+        ttk.Label(scrollable_frame, text="Description (ZH):", font=('', 14)).grid(row=row, column=0, sticky=tk.NW, padx=10, pady=5)
+        self.form_vars['description_zh'] = tk.StringVar()
+        text_zh = scrolledtext.ScrolledText(scrollable_frame, height=4, width=80, wrap=tk.WORD)
+        text_zh.grid(row=row, column=1, sticky=tk.EW, padx=10, pady=5)
+        self.form_vars['description_zh_widget'] = text_zh
+        row += 1
+        
+        ttk.Label(scrollable_frame, text="Description (EN):", font=('', 14)).grid(row=row, column=0, sticky=tk.NW, padx=10, pady=5)
+        self.form_vars['description_en'] = tk.StringVar()
+        text_en = scrolledtext.ScrolledText(scrollable_frame, height=4, width=80, wrap=tk.WORD)
+        text_en.grid(row=row, column=1, sticky=tk.EW, padx=10, pady=5)
+        self.form_vars['description_en_widget'] = text_en
+        row += 1
+        
+        # ===== CLASSIFICATION FIELDS =====
+        ttk.Separator(scrollable_frame, orient='horizontal').grid(row=row, column=0, columnspan=2, sticky=tk.EW, pady=10)
+        row += 1
+        
+        ttk.Label(scrollable_frame, text="Event Domain:", font=('', 14, 'bold')).grid(row=row, column=0, sticky=tk.W, padx=10, pady=5)
+        self.form_vars['event_domain'] = tk.StringVar(value='unknown')
+        ttk.Combobox(scrollable_frame, textvariable=self.form_vars['event_domain'], 
+                    values=self.DOMAINS, state='readonly', width=20).grid(row=row, column=1, sticky=tk.W, padx=10)
+        row += 1
+        
+        ttk.Label(scrollable_frame, text="Event Type:", font=('', 14)).grid(row=row, column=0, sticky=tk.W, padx=10, pady=5)
+        self.form_vars['event_type'] = tk.StringVar(value='unknown')
+        ttk.Combobox(scrollable_frame, textvariable=self.form_vars['event_type'], 
+                    values=self.TYPES, state='readonly', width=20).grid(row=row, column=1, sticky=tk.W, padx=10)
+        row += 1
+        
+        ttk.Label(scrollable_frame, text="Event Scale:", font=('', 14)).grid(row=row, column=0, sticky=tk.W, padx=10, pady=5)
+        self.form_vars['event_scale'] = tk.StringVar(value='unknown')
+        ttk.Combobox(scrollable_frame, textvariable=self.form_vars['event_scale'], 
+                    values=self.SCALES, state='readonly', width=20).grid(row=row, column=1, sticky=tk.W, padx=10)
+        row += 1
+        
+        ttk.Label(scrollable_frame, text="Event Priority:", font=('', 14)).grid(row=row, column=0, sticky=tk.W, padx=10, pady=5)
+        self.form_vars['event_priority'] = tk.StringVar(value='unknown')
+        ttk.Combobox(scrollable_frame, textvariable=self.form_vars['event_priority'], 
+                    values=self.PRIORITIES, state='readonly', width=20).grid(row=row, column=1, sticky=tk.W, padx=10)
+        row += 1
+        
+        # ===== OTHER FIELDS =====
+        ttk.Label(scrollable_frame, text="Participants Count:", font=('', 14, 'bold')).grid(row=row, column=0, sticky=tk.W, padx=10, pady=5)
+        self.form_vars['participants_count'] = tk.StringVar()
+        ttk.Entry(scrollable_frame, textvariable=self.form_vars['participants_count'], width=20).grid(row=row, column=1, sticky=tk.W, padx=10)
+        row += 1
+        
+        ttk.Label(scrollable_frame, text="Sources:", font=('', 14, 'bold')).grid(row=row, column=0, sticky=tk.NW, padx=10, pady=5)
+        self.form_vars['sources'] = tk.StringVar()
+        text_sources = scrolledtext.ScrolledText(scrollable_frame, height=4, width=80, wrap=tk.WORD)
+        text_sources.grid(row=row, column=1, sticky=tk.EW, padx=10, pady=5)
+        self.form_vars['sources_widget'] = text_sources
+        row += 1
+        
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        # ===== SAVE BUTTON =====
+        save_frame = ttk.Frame(main_frame)
+        save_frame.pack(fill=tk.X, pady=10)
+        
+        ttk.Button(save_frame, text="💾 Save Event", 
+                  command=self.save_event).pack(side=tk.LEFT, padx=5)
+        
+        # Configure column weights for resizing
+        scrollable_frame.columnconfigure(1, weight=1)
+    
+    def open_search_dialog(self):
+        """Open event search modal"""
+        modal = SearchEventsModal(self.parent, self.event_manager, self.history_manager)
+        self.parent.wait_window(modal)
+        
+        if modal.selected_event:
+            self.load_event_to_form(modal.selected_event)
+            self.current_event_id = modal.selected_event['event_id']
+    
+    def load_event_to_form(self, event_data: Dict):
+        """Load event data into form fields"""
+        self.form_vars['event_title_ru'].set(event_data.get('event_title_ru', ''))
+        self.form_vars['event_title_zh'].set(event_data.get('event_title_zh', ''))
+        self.form_vars['event_title_en'].set(event_data.get('event_title_en', ''))
+        
+        self.form_vars['event_date'].set(event_data.get('event_date', ''))
+        self.form_vars['event_date_precision'].set(event_data.get('event_date_precision', 'day'))
+        
+        self.form_vars['description_ru_widget'].delete('1.0', tk.END)
+        self.form_vars['description_ru_widget'].insert('1.0', event_data.get('description_ru', ''))
+        
+        self.form_vars['description_zh_widget'].delete('1.0', tk.END)
+        self.form_vars['description_zh_widget'].insert('1.0', event_data.get('description_zh', ''))
+        
+        self.form_vars['description_en_widget'].delete('1.0', tk.END)
+        self.form_vars['description_en_widget'].insert('1.0', event_data.get('description_en', ''))
+        
+        self.form_vars['event_domain'].set(event_data.get('event_domain', 'unknown'))
+        self.form_vars['event_type'].set(event_data.get('event_type', 'unknown'))
+        self.form_vars['event_scale'].set(event_data.get('event_scale', 'unknown'))
+        self.form_vars['event_priority'].set(event_data.get('event_priority', 'unknown'))
+        
+        self.form_vars['participants_count'].set(str(event_data.get('participants_count', '')))
+        
+        self.form_vars['sources_widget'].delete('1.0', tk.END)
+        self.form_vars['sources_widget'].insert('1.0', event_data.get('sources', ''))
+    
+    def get_form_data(self) -> Dict:
+        """Collect form data into dictionary"""
+        return {
+            'event_title_ru': self.form_vars['event_title_ru'].get(),
+            'event_title_zh': self.form_vars['event_title_zh'].get(),
+            'event_title_en': self.form_vars['event_title_en'].get(),
+            'event_date': self.form_vars['event_date'].get(),
+            'event_date_precision': self.form_vars['event_date_precision'].get(),
+            'description_ru': self.form_vars['description_ru_widget'].get('1.0', tk.END).strip(),
+            'description_zh': self.form_vars['description_zh_widget'].get('1.0', tk.END).strip(),
+            'description_en': self.form_vars['description_en_widget'].get('1.0', tk.END).strip(),
+            'event_domain': self.form_vars['event_domain'].get(),
+            'event_type': self.form_vars['event_type'].get(),
+            'event_scale': self.form_vars['event_scale'].get(),
+            'event_priority': self.form_vars['event_priority'].get(),
+            'participants_count': self.form_vars['participants_count'].get(),
+            'sources': self.form_vars['sources_widget'].get('1.0', tk.END).strip()
+        }
+    
+    def save_event(self):
+        """Save event to database"""
+        try:
+            event_data = self.get_form_data()
+            
+            if self.current_event_id:
+                # Update existing event
+                self.event_manager.update_event(self.current_event_id, event_data)
+                messagebox.showinfo("Success", f"Event {self.current_event_id} updated successfully")
+                logger.info(f"Updated event {self.current_event_id}")
+            else:
+                # Create new event
+                event_id = self.event_manager.create_event(event_data)
+                self.history_manager.add_search(event_data)
+                messagebox.showinfo("Success", f"Event created successfully (ID: {event_id})")
+                logger.info(f"Created event {event_id}")
+                self.current_event_id = event_id
+            
+            self.clear_form()
+        
+        except ValueError as e:
+            messagebox.showerror("Validation Error", str(e))
+        except Exception as e:
+            logger.error(f"Error saving event: {e}")
+            messagebox.showerror("Error", f"Error saving event: {str(e)}")
+    
+    def clear_form(self):
+        """Clear all form fields"""
+        for var_name, var in self.form_vars.items():
+            if isinstance(var, tk.StringVar):
+                var.set('')
+        
+        # Clear text widgets
+        if 'description_ru_widget' in self.form_vars:
+            self.form_vars['description_ru_widget'].delete('1.0', tk.END)
+        if 'description_zh_widget' in self.form_vars:
+            self.form_vars['description_zh_widget'].delete('1.0', tk.END)
+        if 'description_en_widget' in self.form_vars:
+            self.form_vars['description_en_widget'].delete('1.0', tk.END)
+        if 'sources_widget' in self.form_vars:
+            self.form_vars['sources_widget'].delete('1.0', tk.END)
+        
+        # Reset dropdown defaults
+        self.form_vars['event_date_precision'].set('day')
+        self.form_vars['event_domain'].set('unknown')
+        self.form_vars['event_type'].set('unknown')
+        self.form_vars['event_scale'].set('unknown')
+        self.form_vars['event_priority'].set('unknown')
+        
+        self.current_event_id = None
+
+
 
 class NetworkAnalyticsApplication:
     """Main GUI application for network analysis"""
@@ -2118,6 +2958,8 @@ class NetworkAnalyticsApplication:
         self.actor_manager = ActorManager(self.db)
         self.name_lookup = NameLookupEngine(self.db)
         self.edge_manager = EdgeManager(self.db)
+        self.event_manager = EventManager(self.db)
+        self.history_manager = SearchHistoryManager()
         self.session = SessionContext()
         
         # Setup UI
@@ -2348,11 +3190,18 @@ This actor ID is now ACTIVE for data entry.
 
 
     def create_events_tab(self):
-        """Tab 4: Events"""
-        frame = ttk.Frame(self.notebook)
-        self.notebook.add(frame, text="📅 Events")
+        """Create Tab 4: Events tab"""
+        events_frame = ttk.Frame(self.notebook)
+        self.notebook.add(events_frame, text="📋 Events")
         
-        ttk.Label(frame, text="Event Management (Implementation in progress)").pack(pady=20)
+        self.events_tab = EventsTab(
+            parent_frame=events_frame,
+            event_manager=self.event_manager,
+            history_manager=self.history_manager,
+            db=self.db
+    )
+    logger.info("Events tab created")
+    
     
     def create_participation_tab(self):
         """Tab 5: Event Participation"""
