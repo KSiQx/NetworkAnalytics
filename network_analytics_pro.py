@@ -328,24 +328,44 @@ class NetworkDatabase:
         
         # TABLE 5: Event_Participation
         cursor.execute('''
-            CREATE TABLE IF NOT EXISTS Event_Participation (
+            CREATE TABLE IF NOT EXISTS event_participation (
                 participation_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                
-                event_id INTEGER NOT NULL REFERENCES Events(event_id),
+                event_id INTEGER NOT NULL REFERENCES events(event_id),
                 actor_id TEXT NOT NULL REFERENCES actors_id(actor_id),
                 
-                role TEXT,
-                participation_type TEXT CHECK(participation_type IN ('organizer', 'speaker', 'attendee', 'victim', 'unknown')),
+                participation_role TEXT DEFAULT 'unknown' CHECK(participation_role IN (
+                    'organizer', 'executor', 'mediator', 'beneficiary', 
+                    'affected_party', 'provocateur', 'observer', 'unknown'
+                )),
                 
+                participation_function TEXT DEFAULT 'unknown' CHECK(participation_function IN (
+                    'leader', 'spokesperson', 'expert', 'witness', 
+                    'information_source', 'unknown'
+                )),
+                
+                participation_position TEXT DEFAULT 'unknown' CHECK(participation_position IN (
+                    'state_actor', 'commercial_actor', 'non_commercial_actor', 
+                    'international_actor', 'illegal_actor', 'religious_actor', 
+                    'individual_actor', 'unknown'
+                )),
+                
+                information_role TEXT DEFAULT 'unknown' CHECK(information_role IN (
+                    'information_spreader', 'information_target', 
+                    'narrative_creator', 'unknown'
+                )),
+                
+                description TEXT,
                 source TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 
                 UNIQUE(event_id, actor_id)
             )
         ''')
-        
-        cursor.execute('CREATE INDEX IF NOT EXISTS idx_participation_event ON Event_Participation(event_id)')
-        cursor.execute('CREATE INDEX IF NOT EXISTS idx_participation_actor ON Event_Participation(actor_id)')
+
+        # Indexes for performance  
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_ep_event ON event_participation(event_id)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_ep_actor ON event_participation(actor_id)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_ep_role ON event_participation(participation_role)')
 
         # TABLE 6: Edges/Relationships
         cursor.execute('''
@@ -795,6 +815,214 @@ class EventManager:
         except Exception as e:
             logger.error(f"Error deleting event: {e}")
             raise
+
+
+class ParticipationManager:
+    """Manager for event participation operations"""
+    
+    # Constants
+    ROLES = ['organizer', 'executor', 'mediator', 'beneficiary', 
+             'affected_party', 'provocateur', 'observer', 'unknown']
+    
+    FUNCTIONS = ['leader', 'spokesperson', 'expert', 'witness', 
+                 'information_source', 'unknown']
+    
+    POSITIONS = ['state_actor', 'commercial_actor', 'non_commercial_actor', 
+                 'international_actor', 'illegal_actor', 'religious_actor', 
+                 'individual_actor', 'unknown']
+    
+    INFO_ROLES = ['information_spreader', 'information_target', 
+                  'narrative_creator', 'unknown']
+    
+    def __init__(self, db: 'NetworkDatabase'):
+        self.db = db
+    
+    def validate_participation(self, participation_data: Dict) -> Tuple[bool, str]:
+        """
+        Validate participation data before insertion
+        Returns: (is_valid, error_message)
+        """
+        
+        # Required fields
+        if not participation_data.get('event_id'):
+            return False, "Error 1: Event ID is required"
+        
+        if not participation_data.get('actor_id') or not participation_data['actor_id'].strip():
+            return False, "Error 2: Actor ID is required"
+        
+        # Verify event exists
+        try:
+            event_result = self.db.execute_query(
+                'SELECT event_id FROM events WHERE event_id = ?',
+                (participation_data['event_id'],)
+            )
+            if not event_result:
+                return False, f"Error 1: Event ID {participation_data['event_id']} not found"
+        except Exception as e:
+            logger.error(f"Error checking event: {e}")
+            return False, f"Error 1: Database error checking event: {str(e)}"
+        
+        # Verify actor exists
+        try:
+            actor_result = self.db.execute_query(
+                'SELECT actor_id FROM actors_id WHERE actor_id = ?',
+                (participation_data['actor_id'],)
+            )
+            if not actor_result:
+                return False, f"Error 2: Actor ID not found"
+        except Exception as e:
+            logger.error(f"Error checking actor: {e}")
+            return False, f"Error 2: Database error checking actor: {str(e)}"
+        
+        # Validate enumerations
+        role = participation_data.get('participation_role', 'unknown')
+        if role not in self.ROLES:
+            return False, f"Error 3: Invalid participation role. Must be one of: {', '.join(self.ROLES)}"
+        
+        function = participation_data.get('participation_function', 'unknown')
+        if function not in self.FUNCTIONS:
+            return False, f"Error 4: Invalid participation function. Must be one of: {', '.join(self.FUNCTIONS)}"
+        
+        position = participation_data.get('participation_position', 'unknown')
+        if position not in self.POSITIONS:
+            return False, f"Error 5: Invalid participation position. Must be one of: {', '.join(self.POSITIONS)}"
+        
+        info_role = participation_data.get('information_role', 'unknown')
+        if info_role not in self.INFO_ROLES:
+            return False, f"Error 6: Invalid information role. Must be one of: {', '.join(self.INFO_ROLES)}"
+        
+        return True, ""
+    
+    def create_participation(self, participation_data: Dict) -> int:
+        """Create new participation, returns participation_id"""
+        
+        is_valid, error_msg = self.validate_participation(participation_data)
+        if not is_valid:
+            raise ValueError(error_msg)
+        
+        query = '''
+            INSERT INTO event_participation (
+                event_id, actor_id, participation_role, participation_function,
+                participation_position, information_role, description, source
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        '''
+        
+        params = (
+            participation_data['event_id'],
+            participation_data['actor_id'],
+            participation_data.get('participation_role', 'unknown'),
+            participation_data.get('participation_function', 'unknown'),
+            participation_data.get('participation_position', 'unknown'),
+            participation_data.get('information_role', 'unknown'),
+            participation_data.get('description'),
+            participation_data.get('source')
+        )
+        
+        try:
+            participation_id = self.db.execute_insert(query, params)
+            logger.info(f"Created participation: {participation_id} (event {participation_data['event_id']}, actor {participation_data['actor_id']})")
+            return participation_id
+        except sqlite3.IntegrityError as e:
+            if 'UNIQUE constraint failed' in str(e):
+                raise ValueError("Error 7: This actor already participates in this event")
+            raise
+        except Exception as e:
+            logger.error(f"Error creating participation: {e}")
+            raise
+    
+    def update_participation(self, participation_id: int, participation_data: Dict) -> bool:
+        """Update existing participation"""
+        
+        is_valid, error_msg = self.validate_participation(participation_data)
+        if not is_valid:
+            raise ValueError(error_msg)
+        
+        query = '''
+            UPDATE event_participation SET
+                participation_role = ?, participation_function = ?,
+                participation_position = ?, information_role = ?,
+                description = ?, source = ?
+            WHERE participation_id = ?
+        '''
+        
+        params = (
+            participation_data.get('participation_role', 'unknown'),
+            participation_data.get('participation_function', 'unknown'),
+            participation_data.get('participation_position', 'unknown'),
+            participation_data.get('information_role', 'unknown'),
+            participation_data.get('description'),
+            participation_data.get('source'),
+            participation_id
+        )
+        
+        try:
+            self.db.execute_insert(query, params)
+            logger.info(f"Updated participation: {participation_id}")
+            return True
+        except Exception as e:
+            logger.error(f"Error updating participation: {e}")
+            raise
+    
+    def get_participation(self, participation_id: int) -> Optional[Dict]:
+        """Get participation by ID"""
+        query = 'SELECT * FROM event_participation WHERE participation_id = ?'
+        result = self.db.execute_query(query, (participation_id,))
+        return dict(result[0]) if result else None
+    
+    def get_participations_for_event(self, event_id: int) -> List[Dict]:
+        """Get all participations for an event"""
+        query = '''
+            SELECT ep.*, e.event_title_ru, a.name_ru 
+            FROM event_participation ep
+            JOIN events e ON ep.event_id = e.event_id
+            JOIN actors_id a ON ep.actor_id = a.actor_id
+            WHERE ep.event_id = ?
+            ORDER BY ep.created_at DESC
+        '''
+        results = self.db.execute_query(query, (event_id,))
+        return [dict(row) for row in results]
+    
+    def get_participations_for_actor(self, actor_id: str) -> List[Dict]:
+        """Get all participations for an actor"""
+        query = '''
+            SELECT ep.*, e.event_title_ru, a.name_ru 
+            FROM event_participation ep
+            JOIN events e ON ep.event_id = e.event_id
+            JOIN actors_id a ON ep.actor_id = a.actor_id
+            WHERE ep.actor_id = ?
+            ORDER BY ep.created_at DESC
+        '''
+        results = self.db.execute_query(query, (actor_id,))
+        return [dict(row) for row in results]
+    
+    def get_all_participations(self, limit: int = 100, offset: int = 0) -> List[Dict]:
+        """Get all participations with pagination"""
+        query = '''
+            SELECT ep.*, e.event_title_ru, a.name_ru 
+            FROM event_participation ep
+            JOIN events e ON ep.event_id = e.event_id
+            JOIN actors_id a ON ep.actor_id = a.actor_id
+            ORDER BY ep.created_at DESC LIMIT ? OFFSET ?
+        '''
+        results = self.db.execute_query(query, (limit, offset))
+        return [dict(row) for row in results]
+    
+    def delete_participation(self, participation_id: int) -> bool:
+        """Delete participation by ID"""
+        query = 'DELETE FROM event_participation WHERE participation_id = ?'
+        try:
+            self.db.execute_insert(query, (participation_id,))
+            logger.info(f"Deleted participation: {participation_id}")
+            return True
+        except Exception as e:
+            logger.error(f"Error deleting participation: {e}")
+            raise
+    
+    def get_participation_count(self) -> int:
+        """Get total participation count"""
+        query = 'SELECT COUNT(*) as cnt FROM event_participation'
+        result = self.db.execute_query(query)
+        return dict(result[0])['cnt'] if result else 0
 
 
 class SearchHistoryManager:
@@ -1450,6 +1678,280 @@ class SearchEventsModal(tk.Toplevel):
     def cancel(self):
         """Cancel and close"""
         self.selected_event = None
+        self.destroy()
+
+
+# Modal Search Event Class for Participation
+
+class ParticipationSearchEventsModal(tk.Toplevel):
+    """Modal dialog for searching and selecting events"""
+    
+    def __init__(self, parent, db: 'NetworkDatabase', title: str = "Select Event"):
+        super().__init__(parent)
+        self.title(title)
+        self.geometry("900x600")
+        self.db = db
+        
+        self.selected_event = None
+        self.search_after_id = None
+        
+        # Make modal
+        self.transient(parent)
+        self.grab_set()
+        
+        self.create_ui()
+        self.focus()
+    
+    def create_ui(self):
+        """Create modal UI"""
+        
+        # Search frame
+        search_frame = ttk.LabelFrame(self, text="🔍 Quick Search", padding=10)
+        search_frame.pack(fill=tk.X, padx=10, pady=10)
+        
+        self.quick_search_var = tk.StringVar()
+        self.quick_search_entry = ttk.Entry(search_frame, textvariable=self.quick_search_var, width=60)
+        self.quick_search_entry.pack(fill=tk.X)
+        self.quick_search_entry.insert(0, "Search by title (RU/ZH/EN)...")
+        
+        # Bind with debounce
+        self.quick_search_var.trace('w', self.on_quick_search_changed)
+        
+        # Results frame
+        results_frame = ttk.LabelFrame(self, text="📊 Events", padding=10)
+        results_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        
+        self.results_tree = ttk.Treeview(results_frame, 
+                                        columns=('ID', 'Date', 'Title (RU)'),
+                                        height=15, show='tree headings')
+        
+        self.results_tree.column('#0', width=0, stretch=tk.NO)
+        self.results_tree.column('ID', anchor=tk.CENTER, width=50)
+        self.results_tree.column('Date', anchor=tk.CENTER, width=100)
+        self.results_tree.column('Title (RU)', anchor=tk.W, width=650)
+        
+        self.results_tree.heading('ID', text='ID')
+        self.results_tree.heading('Date', text='Date')
+        self.results_tree.heading('Title (RU)', text='Title (RU)')
+        
+        scrollbar = ttk.Scrollbar(results_frame, orient='vertical', 
+                                 command=self.results_tree.yview)
+        self.results_tree.configure(yscroll=scrollbar.set)
+        
+        self.results_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        self.results_tree.bind('<Double-1>', lambda e: self.confirm_selection())
+        
+        # Action buttons
+        button_frame = ttk.Frame(self)
+        button_frame.pack(fill=tk.X, padx=10, pady=10)
+        
+        ttk.Button(button_frame, text="✓ Select", 
+                  command=self.confirm_selection).pack(side=tk.LEFT, padx=5)
+        ttk.Button(button_frame, text="✕ Cancel", 
+                  command=self.cancel).pack(side=tk.RIGHT, padx=5)
+        
+        # Initial search
+        self.execute_search()
+    
+    def on_quick_search_changed(self, *args):
+        """Debounced quick search"""
+        if self.search_after_id:
+            self.after_cancel(self.search_after_id)
+        self.search_after_id = self.after(300, self.execute_search)
+    
+    def execute_search(self):
+        """Execute search"""
+        search_term = self.quick_search_var.get().strip()
+        if search_term == "Search by title (RU/ZH/EN)..." or not search_term:
+            search_term = ""
+        
+        # Clear results
+        for item in self.results_tree.get_children():
+            self.results_tree.delete(item)
+        
+        try:
+            if search_term:
+                query = '''
+                    SELECT event_id, event_date, event_title_ru FROM events
+                    WHERE event_title_ru LIKE ? OR event_title_zh LIKE ? OR event_title_en LIKE ?
+                    ORDER BY event_date DESC LIMIT 50
+                '''
+                pattern = f'%{search_term}%'
+                results = self.db.execute_query(query, (pattern, pattern, pattern))
+            else:
+                query = '''
+                    SELECT event_id, event_date, event_title_ru FROM events
+                    ORDER BY event_date DESC LIMIT 50
+                '''
+                results = self.db.execute_query(query)
+            
+            for i, row in enumerate(results):
+                event = dict(row)
+                self.results_tree.insert('', 'end', iid=f"event_{i}",
+                                        values=(event['event_id'], 
+                                               event['event_date'],
+                                               event['event_title_ru']))
+        
+        except Exception as e:
+            logger.error(f"Search error: {e}")
+            messagebox.showerror("Search Error", str(e))
+    
+    def confirm_selection(self):
+        """Get selected event and close"""
+        selection = self.results_tree.selection()
+        if not selection:
+            messagebox.showwarning("No Selection", "Please select an event")
+            return
+        
+        item_id = selection[0]
+        values = self.results_tree.item(item_id, 'values')
+        
+        event_id = int(values[0])
+        self.selected_event = {'event_id': event_id, 'event_date': values[1], 'event_title_ru': values[2]}
+        
+        self.destroy()
+    
+    def cancel(self):
+        """Cancel and close"""
+        self.selected_event = None
+        self.destroy()
+
+
+# Modal Search Actor Class for Participation
+class SearchActorsModal(tk.Toplevel):
+    """Modal dialog for searching and selecting actors"""
+    
+    def __init__(self, parent, db: 'NetworkDatabase', title: str = "Select Actor"):
+        super().__init__(parent)
+        self.title(title)
+        self.geometry("900x600")
+        self.db = db
+        
+        self.selected_actor = None
+        self.search_after_id = None
+        
+        # Make modal
+        self.transient(parent)
+        self.grab_set()
+        
+        self.create_ui()
+        self.focus()
+    
+    def create_ui(self):
+        """Create modal UI"""
+        
+        # Search frame
+        search_frame = ttk.LabelFrame(self, text="🔍 Quick Search", padding=10)
+        search_frame.pack(fill=tk.X, padx=10, pady=10)
+        
+        self.quick_search_var = tk.StringVar()
+        self.quick_search_entry = ttk.Entry(search_frame, textvariable=self.quick_search_var, width=60)
+        self.quick_search_entry.pack(fill=tk.X)
+        self.quick_search_entry.insert(0, "Search by name (RU/ZH/EN/Pinyin)...")
+        
+        # Bind with debounce
+        self.quick_search_var.trace('w', self.on_quick_search_changed)
+        
+        # Results frame
+        results_frame = ttk.LabelFrame(self, text="👤 Actors", padding=10)
+        results_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        
+        self.results_tree = ttk.Treeview(results_frame, 
+                                        columns=('ID', 'Name'),
+                                        height=15, show='tree headings')
+        
+        self.results_tree.column('#0', width=0, stretch=tk.NO)
+        self.results_tree.column('ID', anchor=tk.CENTER, width=300)
+        self.results_tree.column('Name', anchor=tk.W, width=500)
+        
+        self.results_tree.heading('ID', text='Actor ID')
+        self.results_tree.heading('Name', text='Name')
+        
+        scrollbar = ttk.Scrollbar(results_frame, orient='vertical', 
+                                 command=self.results_tree.yview)
+        self.results_tree.configure(yscroll=scrollbar.set)
+        
+        self.results_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        self.results_tree.bind('<Double-1>', lambda e: self.confirm_selection())
+        
+        # Action buttons
+        button_frame = ttk.Frame(self)
+        button_frame.pack(fill=tk.X, padx=10, pady=10)
+        
+        ttk.Button(button_frame, text="✓ Select", 
+                  command=self.confirm_selection).pack(side=tk.LEFT, padx=5)
+        ttk.Button(button_frame, text="✕ Cancel", 
+                  command=self.cancel).pack(side=tk.RIGHT, padx=5)
+        
+        # Initial search
+        self.execute_search()
+    
+    def on_quick_search_changed(self, *args):
+        """Debounced quick search"""
+        if self.search_after_id:
+            self.after_cancel(self.search_after_id)
+        self.search_after_id = self.after(300, self.execute_search)
+    
+    def execute_search(self):
+        """Execute search"""
+        search_term = self.quick_search_var.get().strip()
+        if search_term == "Search by name (RU/ZH/EN/Pinyin)..." or not search_term:
+            search_term = ""
+        
+        # Clear results
+        for item in self.results_tree.get_children():
+            self.results_tree.delete(item)
+        
+        try:
+            if search_term:
+                query = '''
+                    SELECT actor_id, name_ru, name_zh_prc, name_en, pinyin FROM actors_id
+                    WHERE name_ru LIKE ? OR name_zh_prc LIKE ? OR name_en LIKE ? OR pinyin LIKE ?
+                    ORDER BY actor_id LIMIT 50
+                '''
+                pattern = f'%{search_term}%'
+                results = self.db.execute_query(query, (pattern, pattern, pattern, pattern))
+            else:
+                query = '''
+                    SELECT actor_id, name_ru, name_zh_prc, name_en, pinyin FROM actors_id
+                    ORDER BY actor_id LIMIT 50
+                '''
+                results = self.db.execute_query(query)
+            
+            for i, row in enumerate(results):
+                actor = dict(row)
+                name = (actor.get('name_ru') or actor.get('name_zh_prc') or 
+                       actor.get('name_en') or 'Unknown')
+                self.results_tree.insert('', 'end', iid=f"actor_{i}",
+                                        values=(actor['actor_id'], name))
+        
+        except Exception as e:
+            logger.error(f"Search error: {e}")
+            messagebox.showerror("Search Error", str(e))
+    
+    def confirm_selection(self):
+        """Get selected actor and close"""
+        selection = self.results_tree.selection()
+        if not selection:
+            messagebox.showwarning("No Selection", "Please select an actor")
+            return
+        
+        item_id = selection[0]
+        values = self.results_tree.item(item_id, 'values')
+        
+        actor_id = values[0]
+        actor_name = values[1]
+        self.selected_actor = {'actor_id': actor_id, 'actor_name': actor_name}
+        
+        self.destroy()
+    
+    def cancel(self):
+        """Cancel and close"""
+        self.selected_actor = None
         self.destroy()
 
 
@@ -2943,6 +3445,239 @@ class EventsTab:
         self.current_event_id = None
 
 
+class ParticipationTab:
+    """Complete implementation of Participation tab"""
+    
+    ROLES = ['organizer', 'executor', 'mediator', 'beneficiary', 
+             'affected_party', 'provocateur', 'observer', 'unknown']
+    
+    FUNCTIONS = ['leader', 'spokesperson', 'expert', 'witness', 
+                 'information_source', 'unknown']
+    
+    POSITIONS = ['state_actor', 'commercial_actor', 'non_commercial_actor', 
+                 'international_actor', 'illegal_actor', 'religious_actor', 
+                 'individual_actor', 'unknown']
+    
+    INFO_ROLES = ['information_spreader', 'information_target', 
+                  'narrative_creator', 'unknown']
+    
+    def __init__(self, parent_frame, participation_manager, db):
+        """Initialize Participation tab"""
+        self.participation_manager = participation_manager
+        self.db = db
+        self.parent = parent_frame
+        
+        self.current_participation_id = None
+        self.current_event_id = None
+        self.current_actor_id = None
+        self.form_vars = {}
+        
+        self.create_ui()
+        logger.info("Participation tab initialized")
+    
+    def create_ui(self):
+        """Create complete UI for participation tab"""
+        
+        main_frame = ttk.Frame(self.parent)
+        main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        
+        # ===== TOP BUTTONS =====
+        button_frame = ttk.Frame(main_frame)
+        button_frame.pack(fill=tk.X, pady=(0, 10))
+        
+        ttk.Button(button_frame, text="🔍 Select Event", 
+                  command=self.select_event).pack(side=tk.LEFT, padx=5)
+        ttk.Button(button_frame, text="👤 Select Actor", 
+                  command=self.select_actor).pack(side=tk.LEFT, padx=5)
+        ttk.Button(button_frame, text="🗑️ Clear Form", 
+                  command=self.clear_form).pack(side=tk.LEFT, padx=5)
+        
+        # ===== FORM FIELDS =====
+        form_frame = ttk.Frame(main_frame)
+        form_frame.pack(fill=tk.BOTH, expand=True)
+        
+        # Create scrollable frame
+        canvas = tk.Canvas(form_frame, bg='white')
+        scrollbar = ttk.Scrollbar(form_frame, orient='vertical', command=canvas.yview)
+        scrollable_frame = ttk.Frame(canvas)
+        
+        scrollable_frame.bind(
+            "<Configure>",
+            lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+        )
+        
+        canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+
+
+        # Update canvas width when window size changes
+        def on_frame_configure(event):
+            canvas.itemconfig(1, width=event.width)
+        form_frame.bind("<Configure>", on_frame_configure)
+
+    
+        row = 0
+        
+        # ===== EVENT & ACTOR DISPLAY =====
+        ttk.Label(scrollable_frame, text="Event ID:", font=('', 14, 'bold')).grid(row=row, column=0, sticky=tk.W, pady=5)
+        self.form_vars['event_id_display'] = ttk.Label(scrollable_frame, text="None", relief=tk.SUNKEN)
+        self.form_vars['event_id_display'].grid(row=row, column=1, sticky=tk.EW, padx=10, ipady=5)
+        row += 1
+        
+        ttk.Label(scrollable_frame, text="Event Title:", font=('', 14, 'bold')).grid(row=row, column=0, sticky=tk.W, pady=5)
+        self.form_vars['event_title_display'] = ttk.Label(scrollable_frame, text="None", relief=tk.SUNKEN)
+        self.form_vars['event_title_display'].grid(row=row, column=1, sticky=tk.EW, padx=10, ipady=5)
+        row += 1
+        
+        ttk.Label(scrollable_frame, text="Actor ID:", font=('', 14, 'bold')).grid(row=row, column=0, sticky=tk.W, pady=5)
+        self.form_vars['actor_id_display'] = ttk.Label(scrollable_frame, text="None", relief=tk.SUNKEN)
+        self.form_vars['actor_id_display'].grid(row=row, column=1, sticky=tk.EW, padx=10, ipady=5)
+        row += 1
+        
+        ttk.Label(scrollable_frame, text="Actor Name:", font=('', 14, 'bold')).grid(row=row, column=0, sticky=tk.W, pady=5)
+        self.form_vars['actor_name_display'] = ttk.Label(scrollable_frame, text="None", relief=tk.SUNKEN)
+        self.form_vars['actor_name_display'].grid(row=row, column=1, sticky=tk.EW, padx=10, ipady=5)
+        row += 1
+        
+        # ===== CLASSIFICATION FIELDS =====
+        ttk.Separator(scrollable_frame, orient='horizontal').grid(row=row, column=0, columnspan=2, sticky=tk.EW, pady=10)
+        row += 1
+        
+        ttk.Label(scrollable_frame, text="Participation Role:", font=('', 14, 'bold')).grid(row=row, column=0, sticky=tk.W, pady=5)
+        self.form_vars['participation_role'] = tk.StringVar(value='unknown')
+        ttk.Combobox(scrollable_frame, textvariable=self.form_vars['participation_role'], 
+                    values=self.ROLES, state='readonly', width=30).grid(row=row, column=1, sticky=tk.W, padx=10)
+        row += 1
+        
+        ttk.Label(scrollable_frame, text="Participation Function:").grid(row=row, column=0, sticky=tk.W, pady=5)
+        self.form_vars['participation_function'] = tk.StringVar(value='unknown')
+        ttk.Combobox(scrollable_frame, textvariable=self.form_vars['participation_function'], 
+                    values=self.FUNCTIONS, state='readonly', width=30).grid(row=row, column=1, sticky=tk.W, padx=10)
+        row += 1
+        
+        ttk.Label(scrollable_frame, text="Participation Position:").grid(row=row, column=0, sticky=tk.W, pady=5)
+        self.form_vars['participation_position'] = tk.StringVar(value='unknown')
+        ttk.Combobox(scrollable_frame, textvariable=self.form_vars['participation_position'], 
+                    values=self.POSITIONS, state='readonly', width=30).grid(row=row, column=1, sticky=tk.W, padx=10)
+        row += 1
+        
+        ttk.Label(scrollable_frame, text="Information Role:").grid(row=row, column=0, sticky=tk.W, pady=5)
+        self.form_vars['information_role'] = tk.StringVar(value='unknown')
+        ttk.Combobox(scrollable_frame, textvariable=self.form_vars['information_role'], 
+                    values=self.INFO_ROLES, state='readonly', width=30).grid(row=row, column=1, sticky=tk.W, padx=10)
+        row += 1
+        
+        # ===== DESCRIPTION & SOURCE =====
+        ttk.Separator(scrollable_frame, orient='horizontal').grid(row=row, column=0, columnspan=2, sticky=tk.EW, pady=10)
+        row += 1
+        
+        ttk.Label(scrollable_frame, text="Description:", font=('', 14, 'bold')).grid(row=row, column=0, sticky=tk.NW, pady=5)
+        text_description = scrolledtext.ScrolledText(scrollable_frame, height=4, width=80, wrap=tk.WORD)
+        text_description.grid(row=row, column=1, sticky=tk.EW, padx=10, pady=5)
+        self.form_vars['description_widget'] = text_description
+        row += 1
+        
+        ttk.Label(scrollable_frame, text="Source:").grid(row=row, column=0, sticky=tk.NW, pady=5)
+        text_source = scrolledtext.ScrolledText(scrollable_frame, height=4, width=80, wrap=tk.WORD)
+        text_source.grid(row=row, column=1, sticky=tk.EW, padx=10, pady=5)
+        self.form_vars['source_widget'] = text_source
+        row += 1
+        
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        # ===== ACTION BUTTONS =====
+        action_frame = ttk.Frame(main_frame)
+        action_frame.pack(fill=tk.X, pady=10)
+        
+        ttk.Button(action_frame, text="💾 Save Participation", 
+                  command=self.save_participation).pack(side=tk.LEFT, padx=5)
+        ttk.Button(action_frame, text="❌ Cancel", 
+                  command=self.clear_form).pack(side=tk.LEFT, padx=5)
+        
+        # Configure column weights
+        scrollable_frame.columnconfigure(1, weight=1)
+    
+    def select_event(self):
+        """Open event search modal"""
+        modal = ParticipationSearchEventsModal(self.parent, self.db)
+        self.parent.wait_window(modal)
+        
+        if modal.selected_event:
+            self.current_event_id = modal.selected_event['event_id']
+            self.form_vars['event_id_display'].config(text=str(self.current_event_id))
+            self.form_vars['event_title_display'].config(text=modal.selected_event['event_title_ru'])
+    
+    def select_actor(self):
+        """Open actor search modal"""
+        modal = SearchActorsModal(self.parent, self.db)
+        self.parent.wait_window(modal)
+        
+        if modal.selected_actor:
+            self.current_actor_id = modal.selected_actor['actor_id']
+            self.form_vars['actor_id_display'].config(text=self.current_actor_id[:12] + "...")
+            self.form_vars['actor_name_display'].config(text=modal.selected_actor['actor_name'])
+    
+    def get_form_data(self) -> Dict:
+        """Collect form data into dictionary"""
+        return {
+            'event_id': self.current_event_id,
+            'actor_id': self.current_actor_id,
+            'participation_role': self.form_vars['participation_role'].get(),
+            'participation_function': self.form_vars['participation_function'].get(),
+            'participation_position': self.form_vars['participation_position'].get(),
+            'information_role': self.form_vars['information_role'].get(),
+            'description': self.form_vars['description_widget'].get('1.0', tk.END).strip(),
+            'source': self.form_vars['source_widget'].get('1.0', tk.END).strip()
+        }
+    
+    def save_participation(self):
+        """Save participation to database"""
+        try:
+            participation_data = self.get_form_data()
+            
+            if self.current_participation_id:
+                # Update existing
+                self.participation_manager.update_participation(
+                    self.current_participation_id, participation_data)
+                messagebox.showinfo("Success", 
+                    f"Participation {self.current_participation_id} updated successfully")
+                logger.info(f"Updated participation {self.current_participation_id}")
+            else:
+                # Create new
+                participation_id = self.participation_manager.create_participation(participation_data)
+                messagebox.showinfo("Success", 
+                    f"Participation created successfully (ID: {participation_id})")
+                logger.info(f"Created participation {participation_id}")
+                self.current_participation_id = participation_id
+            
+            self.clear_form()
+        
+        except ValueError as e:
+            messagebox.showerror("Validation Error", str(e))
+        except Exception as e:
+            logger.error(f"Error saving participation: {e}")
+            messagebox.showerror("Error", f"Error saving participation: {str(e)}")
+    
+    def clear_form(self):
+        """Clear all form fields"""
+        self.current_participation_id = None
+        self.current_event_id = None
+        self.current_actor_id = None
+        
+        self.form_vars['event_id_display'].config(text="None")
+        self.form_vars['event_title_display'].config(text="None")
+        self.form_vars['actor_id_display'].config(text="None")
+        self.form_vars['actor_name_display'].config(text="None")
+        
+        self.form_vars['participation_role'].set('unknown')
+        self.form_vars['participation_function'].set('unknown')
+        self.form_vars['participation_position'].set('unknown')
+        self.form_vars['information_role'].set('unknown')
+        
+        self.form_vars['description_widget'].delete('1.0', tk.END)
+        self.form_vars['source_widget'].delete('1.0', tk.END)
+
 
 class NetworkAnalyticsApplication:
     """Main GUI application for network analysis"""
@@ -2959,6 +3694,7 @@ class NetworkAnalyticsApplication:
         self.name_lookup = NameLookupEngine(self.db)
         self.edge_manager = EdgeManager(self.db)
         self.event_manager = EventManager(self.db)
+        self.participation_manager = ParticipationManager(self.db)
         self.history_manager = SearchHistoryManager()
         self.session = SessionContext()
         
@@ -3203,12 +3939,19 @@ This actor ID is now ACTIVE for data entry.
     logger.info("Events tab created")
     
     
+
     def create_participation_tab(self):
-        """Tab 5: Event Participation"""
-        frame = ttk.Frame(self.notebook)
-        self.notebook.add(frame, text="👥 Participation")
+        """Tab 5: Create Participation tab"""
+        participation_frame = ttk.Frame(self.notebook)
+        self.notebook.add(participation_frame, text="🤝 Participation")
         
-        ttk.Label(frame, text="Event Participation (Implementation in progress)").pack(pady=20)
+        self.participation_tab = ParticipationTab(
+            parent_frame=participation_frame,
+            participation_manager=self.participation_manager,
+            db=self.db
+        )
+    
+    logger.info("Participation tab created")
     
     def create_statistics_tab(self):
         """Tab 6: Statistics"""

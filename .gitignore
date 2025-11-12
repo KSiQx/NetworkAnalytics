@@ -11,6 +11,7 @@ network_analysis_project/
 *.db
 *.sqlite
 *.sqlite3
+*.json
 
 # Ignore MANUALS
 *.md
