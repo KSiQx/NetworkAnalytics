@@ -4,6 +4,12 @@ network_analysis_project/
 # Ignore log files
 *.log
 
+# Ignore .pyc files
+**/__pycache__/
+*.pyc
+*.pyo
+
+
 # Ignore IDE configuration files 
 .vscode/
 
