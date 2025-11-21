@@ -42,6 +42,11 @@ from tkinter import ttk, messagebox, scrolledtext, filedialog
 from datetime import datetime, date
 from typing import Optional, List, Dict, Tuple
 from dataclasses import dataclass, field, asdict
+# from network_analytics.descriptive_metrics import create_metrics_tables
+from network_analytics.descriptive_metrics import (DescriptiveMetricsCalculator, create_metrics_tables, save_node_metrics)
+from network_analytics.utils.graph_builders import build_actor_network
+# from network_analytics.descriptive_metrics import save_node_metrics
+import networkx as nx
 import difflib
 import logging
 import os
@@ -397,6 +402,10 @@ class NetworkDatabase:
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_edges_timestamp ON edges(created_timestamp)')
         
         self.conn.commit()
+
+        # Create analytics tables
+        create_metrics_tables(self.conn)
+
         logger.info("All database tables initialized")
 
 
@@ -1482,7 +1491,7 @@ class SearchEventsModal(tk.Toplevel):
         
         self.quick_search_var = tk.StringVar()
         self.quick_search_entry = ttk.Entry(search_frame, textvariable=self.quick_search_var, 
-                                            width=60)
+                                            width=60, font=("Arial Unicode MS", 12))  
         self.quick_search_entry.pack(fill=tk.X)
         self.quick_search_entry.insert(0, "Search by title (RU/ZH/EN)...")
         
@@ -1710,7 +1719,7 @@ class ParticipationSearchEventsModal(tk.Toplevel):
         search_frame.pack(fill=tk.X, padx=10, pady=10)
         
         self.quick_search_var = tk.StringVar()
-        self.quick_search_entry = ttk.Entry(search_frame, textvariable=self.quick_search_var, width=60)
+        self.quick_search_entry = ttk.Entry(search_frame, textvariable=self.quick_search_var, width=60, font=("Arial Unicode MS", 12))
         self.quick_search_entry.pack(fill=tk.X)
         self.quick_search_entry.insert(0, "Search by title (RU/ZH/EN)...")
         
@@ -1847,7 +1856,7 @@ class SearchActorsModal(tk.Toplevel):
         search_frame.pack(fill=tk.X, padx=10, pady=10)
         
         self.quick_search_var = tk.StringVar()
-        self.quick_search_entry = ttk.Entry(search_frame, textvariable=self.quick_search_var, width=60)
+        self.quick_search_entry = ttk.Entry(search_frame, textvariable=self.quick_search_var, width=60, font=("Arial Unicode MS", 12))
         self.quick_search_entry.pack(fill=tk.X)
         self.quick_search_entry.insert(0, "Search by name (RU/ZH/EN/Pinyin)...")
         
@@ -1988,7 +1997,7 @@ class SelectActorModal(tk.Toplevel):
         input_frame = ttk.Frame(search_frame)
         input_frame.pack(fill=tk.X, pady=10)
 
-        self.search_entry = ttk.Entry(input_frame, width=60)
+        self.search_entry = ttk.Entry(input_frame, width=60, font=("Arial Unicode MS", 12))
         self.search_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
         self.search_entry.bind('<Return>', lambda e: self.execute_search())
 
@@ -2239,7 +2248,7 @@ class ActorsBiographicalTab:
         date_frame.pack(fill=tk.X, padx=10, pady=10)
         
         ttk.Label(date_frame, text="Observation Date (YYYY-MM-DD):").grid(row=0, column=0, sticky=tk.W)
-        self.obs_date_entry = ttk.Entry(date_frame, width=30)
+        self.obs_date_entry = ttk.Entry(date_frame, width=30, font=("Arial Unicode MS", 12))
         self.obs_date_entry.grid(row=0, column=1, sticky=tk.EW, padx=10)
         self.obs_date_entry.insert(0, datetime.now().strftime("%Y-%m-%d"))
         
@@ -2270,25 +2279,25 @@ class ActorsBiographicalTab:
         
         # Birth Place
         ttk.Label(bio_frame, text="Birth Place:").grid(row=row, column=0, sticky=tk.NW, pady=5)
-        self.birth_place_entry = tk.Text(bio_frame, height=2, width=60)
+        self.birth_place_entry = tk.Text(bio_frame, height=2, width=60, font=("Arial Unicode MS", 12))
         self.birth_place_entry.grid(row=row, column=1, columnspan=2, sticky=tk.EW, padx=10, pady=5)
         row += 1
         
         # Education
         ttk.Label(bio_frame, text="Education:").grid(row=row, column=0, sticky=tk.NW, pady=5)
-        self.education_entry = tk.Text(bio_frame, height=3, width=60)
+        self.education_entry = tk.Text(bio_frame, height=3, width=60, font=("Arial Unicode MS", 12))
         self.education_entry.grid(row=row, column=1, columnspan=2, sticky=tk.EW, padx=10, pady=5)
         row += 1
         
         # Academic Titles
         ttk.Label(bio_frame, text="Academic Titles:").grid(row=row, column=0, sticky=tk.NW, pady=5)
-        self.academic_titles_entry = ttk.Entry(bio_frame, width=60)
+        self.academic_titles_entry = ttk.Entry(bio_frame, width=60, font=("Arial Unicode MS", 12))
         self.academic_titles_entry.grid(row=row, column=1, columnspan=2, sticky=tk.EW, padx=10, pady=5)
         row += 1
         
         # Academic Works
         ttk.Label(bio_frame, text="Academic Works:").grid(row=row, column=0, sticky=tk.NW, pady=5)
-        self.academic_works_entry = tk.Text(bio_frame, height=2, width=60)
+        self.academic_works_entry = tk.Text(bio_frame, height=2, width=60, font=("Arial Unicode MS", 12))
         self.academic_works_entry.grid(row=row, column=1, columnspan=2, sticky=tk.EW, padx=10, pady=5)
         row += 1
         
@@ -2301,17 +2310,17 @@ class ActorsBiographicalTab:
         row = 0
         
         ttk.Label(pol_frame, text="Political Party:").grid(row=row, column=0, sticky=tk.W, pady=5)
-        self.political_party_entry = ttk.Entry(pol_frame, width=40)
+        self.political_party_entry = ttk.Entry(pol_frame, width=40, font=("Arial Unicode MS", 12))
         self.political_party_entry.grid(row=row, column=1, sticky=tk.EW, padx=10, pady=5)
         row += 1
         
         ttk.Label(pol_frame, text="Party Rank:").grid(row=row, column=0, sticky=tk.W, pady=5)
-        self.party_rank_entry = ttk.Entry(pol_frame, width=40)
+        self.party_rank_entry = ttk.Entry(pol_frame, width=40, font=("Arial Unicode MS", 12))
         self.party_rank_entry.grid(row=row, column=1, sticky=tk.EW, padx=10, pady=5)
         row += 1
         
         ttk.Label(pol_frame, text="Political Works:").grid(row=row, column=0, sticky=tk.NW, pady=5)
-        self.political_works_entry = tk.Text(pol_frame, height=2, width=60)
+        self.political_works_entry = tk.Text(pol_frame, height=2, width=60, font=("Arial Unicode MS", 12))
         self.political_works_entry.grid(row=row, column=1, sticky=tk.EW, padx=10, pady=5)
         row += 1
         
@@ -2324,12 +2333,12 @@ class ActorsBiographicalTab:
         row = 0
         
         ttk.Label(prof_frame, text="Position:").grid(row=row, column=0, sticky=tk.W, pady=5)
-        self.prof_position_entry = ttk.Entry(prof_frame, width=40)
+        self.prof_position_entry = ttk.Entry(prof_frame, width=40, font=("Arial Unicode MS", 12))
         self.prof_position_entry.grid(row=row, column=1, sticky=tk.EW, padx=10, pady=5)
         row += 1
         
         ttk.Label(prof_frame, text="Rank:").grid(row=row, column=0, sticky=tk.W, pady=5)
-        self.prof_rank_entry = ttk.Entry(prof_frame, width=40)
+        self.prof_rank_entry = ttk.Entry(prof_frame, width=40, font=("Arial Unicode MS", 12))
         self.prof_rank_entry.grid(row=row, column=1, sticky=tk.EW, padx=10, pady=5)
         row += 1
         
@@ -2342,12 +2351,12 @@ class ActorsBiographicalTab:
         row = 0
         
         ttk.Label(elec_frame, text="Elections (comma-separated years):").grid(row=row, column=0, sticky=tk.W, pady=5)
-        self.elections_entry = ttk.Entry(elec_frame, width=40)
+        self.elections_entry = ttk.Entry(elec_frame, width=40, font=("Arial Unicode MS", 12))
         self.elections_entry.grid(row=row, column=1, sticky=tk.EW, padx=10, pady=5)
         row += 1
         
         ttk.Label(elec_frame, text="Status in Elected Bodies:").grid(row=row, column=0, sticky=tk.W, pady=5)
-        self.elected_status_entry = ttk.Entry(elec_frame, width=40)
+        self.elected_status_entry = ttk.Entry(elec_frame, width=40, font=("Arial Unicode MS", 12))
         self.elected_status_entry.grid(row=row, column=1, sticky=tk.EW, padx=10, pady=5)
         row += 1
         
@@ -2360,17 +2369,17 @@ class ActorsBiographicalTab:
         row = 0
         
         ttk.Label(org_frame, text="Affiliation (Organization):").grid(row=row, column=0, sticky=tk.W, pady=5)
-        self.affiliation_entry = ttk.Entry(org_frame, width=40)
+        self.affiliation_entry = ttk.Entry(org_frame, width=40, font=("Arial Unicode MS", 12))
         self.affiliation_entry.grid(row=row, column=1, sticky=tk.EW, padx=10, pady=5)
         row += 1
         
         ttk.Label(org_frame, text="First Seen (YYYY-MM-DD):").grid(row=row, column=0, sticky=tk.W, pady=5)
-        self.first_seen_entry = ttk.Entry(org_frame, width=40)
+        self.first_seen_entry = ttk.Entry(org_frame, width=40, font=("Arial Unicode MS", 12))
         self.first_seen_entry.grid(row=row, column=1, sticky=tk.EW, padx=10, pady=5)
         row += 1
         
         ttk.Label(org_frame, text="Last Seen (YYYY-MM-DD):").grid(row=row, column=0, sticky=tk.W, pady=5)
-        self.last_seen_entry = ttk.Entry(org_frame, width=40)
+        self.last_seen_entry = ttk.Entry(org_frame, width=40, font=("Arial Unicode MS", 12))
         self.last_seen_entry.grid(row=row, column=1, sticky=tk.EW, padx=10, pady=5)
         row += 1
         
@@ -2388,7 +2397,7 @@ class ActorsBiographicalTab:
         source_frame.pack(fill=tk.X, padx=10, pady=10)
         
         ttk.Label(source_frame, text="Source (Data Citation):").grid(row=0, column=0, sticky=tk.NW, pady=5)
-        self.source_entry = tk.Text(source_frame, height=2, width=60)
+        self.source_entry = tk.Text(source_frame, height=2, width=60, font=("Arial Unicode MS", 12))
         self.source_entry.grid(row=0, column=1, sticky=tk.EW, padx=10, pady=5)
         
         source_frame.columnconfigure(1, weight=1)
@@ -2416,7 +2425,7 @@ class ActorsBiographicalTab:
         alias_input_frame.pack(fill=tk.X, pady=10)
         
         ttk.Label(alias_input_frame, text="Alias Name:").grid(row=0, column=0, sticky=tk.W, pady=5)
-        self.alias_name_entry = ttk.Entry(alias_input_frame, width=30)
+        self.alias_name_entry = ttk.Entry(alias_input_frame, width=30, font=("Arial Unicode MS", 12))
         self.alias_name_entry.grid(row=0, column=1, sticky=tk.EW, padx=10, pady=5)
         
         ttk.Label(alias_input_frame, text="Type:").grid(row=1, column=0, sticky=tk.W, pady=5)
@@ -3679,6 +3688,271 @@ class ParticipationTab:
         self.form_vars['source_widget'].delete('1.0', tk.END)
 
 
+class StatsTab:
+    """Stats GUI application for network analysis"""
+    def __init__(self, parent_frame,root=None, db_path='network_analytics.db', status_label=None):
+        self.parent = parent_frame
+        self.root = parent_frame.winfo_toplevel() 
+        self.status_label = status_label
+        self.db_path = db_path
+
+        self.setup_ui()
+
+
+
+    def setup_ui(self):
+        self.stats_text = scrolledtext.ScrolledText(self.parent, height=25)
+        self.stats_text.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        self.results_text = self.stats_text
+
+
+
+        # ttk.Button(stats_frame, text="Compute Statistics", command=self.compute_statistics).pack(pady=10)
+
+        # Metrics button
+        metrics_button = ttk.Button(
+            self.parent,
+            text="Calculate Network Metrics",
+            command=self.on_calculate_metrics
+        )
+        metrics_button.pack(pady=10)
+
+        # Calculate Degree Centrality button
+
+        calculate_degree_centrality_button = ttk.Button(
+            self.parent,
+            text="Calculate Degree Centrality",
+            command=self.on_calculate_degree_centrality
+        )
+        calculate_degree_centrality_button.pack(pady=10)
+
+        # Calculate Subset Nodes button
+        calculate_subset_nodes_button = ttk.Button(
+            self.parent,
+            text="Calculate Subset Nodes",
+            command=self.on_calculate_subset_nodes
+        )
+        calculate_subset_nodes_button.pack(pady=10)
+        
+        # Save Metrics to Database button
+        save_metrics_to_database_button = ttk.Button(
+            self.parent,
+            text="Save Metrics to Database",
+            command=self.on_save_metrics_to_database
+        )
+        save_metrics_to_database_button.pack(pady=10)
+        
+        # self.stats_text = scrolledtext.ScrolledText(self.parent, height=25)
+        # self.stats_text.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+
+
+    def on_calculate_metrics(self):
+        """Calculate and display network metrics."""
+        try:
+            # Build network from database
+            G = build_actor_network(self.db_path)
+
+            # Calculate metrics
+            calc = DescriptiveMetricsCalculator(G)
+            degree_cent = calc.degree_centrality()
+
+            # Display results
+            self.display_metrics_results(degree_cent)
+
+            self.status_label.config(
+                text="✓ Metrics calculated successfully"
+            )
+
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to calculate metrics: {e}")
+
+
+    def on_calculate_degree_centrality(self):
+        try:
+            # Clear previous results
+            self.results_text.delete(1.0, tk.END)
+            
+            # Create graph from database
+            G = build_actor_network(self.db_path)
+            
+            # Initialize calculator
+            calc = DescriptiveMetricsCalculator(G)
+            
+            # Calculate degree centrality
+            degree_centrality = calc.degree_centrality()
+            
+            # View top 10 most connected actors
+            sorted_actors = sorted(
+                degree_centrality.items(), 
+                key=lambda x: x[1], 
+                reverse=True
+            )
+            
+            # Display results
+            self.results_text.insert(tk.END, "Top 10 Most Connected Actors:\n")
+            self.results_text.insert(tk.END, "=" * 50 + "\n")
+            
+            for rank, (actor_id, centrality) in enumerate(sorted_actors[:10], 1):
+                self.results_text.insert(
+                    tk.END,
+                    f"{rank:2d}. {actor_id:20s} → {centrality:.4f}\n"
+                )
+        
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed: {str(e)}")
+
+
+    def on_calculate_subset_nodes(self):
+        try:
+            # Calculate centrality for subset of actors
+            # specific_actors = ['actor_uuid_1', 'actor_uuid_2', 'actor_uuid_3']
+            if self.degree_centrality_results:
+                available_actors = list(self.degree_centrality_results.keys())
+                specific_actors = available_actors[:3] 
+            
+            G = build_actor_network(self.db_path)
+            calc = DescriptiveMetricsCalculator(G)
+            
+            subset_centrality = calc.degree_centrality(node_list=specific_actors)
+            
+            # Display in results
+            self.results_text.delete(1.0, tk.END)
+            self.results_text.insert(tk.END, "Subset Actor Centrality:\n")
+            self.results_text.insert(tk.END, "=" * 50 + "\n\n")
+            
+            for actor_id, centrality in sorted(subset_centrality.items(), 
+                                            key=lambda x: x[1], reverse=True):
+                self.results_text.insert(
+                    tk.END,
+                    f"{actor_id:20s} → {centrality:.4f}\n"
+                )
+        
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed: {str(e)}")
+
+
+    def display_metrics_results(self, centrality_dict):
+        """Display centrality results in table."""
+
+        # Create new window
+        results_window = tk.Toplevel(self.root)
+        results_window.title("Degree Centrality Results")
+        results_window.geometry("600x400")
+
+        # Create treeview
+        columns = ("Actor ID", "Centrality", "Rank")
+        tree = ttk.Treeview(results_window, columns=columns, height=20)
+        tree.column("#0", width=0, stretch=tk.NO)
+        tree.column("Actor ID", anchor=tk.W, width=200)
+        tree.column("Centrality", anchor=tk.CENTER, width=150)
+        tree.column("Rank", anchor=tk.CENTER, width=100)
+
+        tree.heading("#0", text="", anchor=tk.W)
+        tree.heading("Actor ID", text="Actor ID", anchor=tk.W)
+        tree.heading("Centrality", text="Degree Centrality", anchor=tk.CENTER)
+        tree.heading("Rank", text="Rank", anchor=tk.CENTER)
+
+        # Sort and populate
+        sorted_results = sorted(
+            centrality_dict.items(),
+            key=lambda x: x[1],
+            reverse=True
+        )
+
+        for rank, (actor_id, centrality) in enumerate(sorted_results, 1):
+            tree.insert(parent='', index='end', text='',
+                values=(actor_id, f"{centrality:.4f}", rank)
+            )
+
+        tree.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+
+
+    def on_save_metrics_to_database(self):
+        try:
+            # Calculate metrics if not already done
+            if not hasattr(self, 'degree_centrality_results'):
+                G = build_actor_network(self.db_path)
+                calc = DescriptiveMetricsCalculator(G)
+                self.degree_centrality_results = calc.degree_centrality()
+            
+            # Connect to database
+            conn = sqlite3.connect(self.db_path)
+            
+            # Save each actor's metrics
+            for actor_id, dc_value in self.degree_centrality_results.items():
+                
+                # Prepare metrics dictionary
+                metrics_to_save = {
+                    'degree_centrality': dc_value,
+                    'betweenness_centrality': None,
+                    'eigenvector_centrality': None,
+                    'closeness_centrality': None,
+                    'clustering_coefficient': None
+                }
+                
+                # Save to database
+                metric_id = save_node_metrics(
+                    db_connection=conn,
+                    actor_id=actor_id,
+                    metric_date=str(date.today()),
+                    metrics=metrics_to_save,
+                    network_filter='all',
+                    method_version='1.0'
+                )
+                
+                print(f"Saved metric with ID: {metric_id}")
+            
+            conn.close()
+            self.results_text.insert(tk.END, 
+                f"\nMetrics saved to database on {date.today()}")
+            messagebox.showinfo("Success", "Metrics saved!")
+        
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to save: {str(e)}")
+
+    
+#     def compute_statistics(self):
+#         """Compute and display database statistics"""
+#         try:
+#             self.stats_text.delete("1.0", tk.END)
+            
+#             # Get counts
+#             actors_id_count = self.db.execute_query("SELECT COUNT(*) as cnt FROM actors_id")[0]['cnt']
+#             actors_records = self.db.execute_query("SELECT COUNT(*) as cnt FROM Actors")[0]['cnt']
+#             aliases_count = self.db.execute_query("SELECT COUNT(*) as cnt FROM Actor_Aliases")[0]['cnt']
+#             events_count = self.db.execute_query("SELECT COUNT(*) as cnt FROM Events")[0]['cnt']
+#             participations = self.db.execute_query("SELECT COUNT(*) as cnt FROM Event_Participation")[0]['cnt']
+            
+#             stats = f"""
+# ╔════════════════════════════════════════════════════════════╗
+# ║           DATABASE STATISTICS                              ║
+# ╚════════════════════════════════════════════════════════════╝
+
+# 👤 ACTORS:
+#    • Unique Actor IDs: {actors_id_count}
+#    • Biographical Records: {actors_records}
+#    • Name Aliases: {aliases_count}
+
+# 📅 EVENTS:
+#    • Total Events: {events_count}
+#    • Event Participations: {participations}
+
+# 🔗 RELATIONSHIPS:
+#    (To be computed)
+
+# 📊 QUALITY METRICS:
+#    • Database File: {DB_PATH}
+#    • Last Updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+
+# """
+#             self.stats_text.insert("1.0", stats)
+#             self.update_status("✓ Statistics computed")
+            
+#         except Exception as e:
+#             logger.error(f"Error computing statistics: {e}")
+#             messagebox.showerror("Error", str(e))
+
+
 class NetworkAnalyticsApplication:
     """Main GUI application for network analysis"""
     
@@ -3705,7 +3979,6 @@ class NetworkAnalyticsApplication:
 
         # Initialize bio tab reference (will be set in create_actors_tab)
         self.actors_bio_tab = None
-
         
         logger.info("Application initialized")
     
@@ -3719,6 +3992,7 @@ class NetworkAnalyticsApplication:
     #     style.configure('TLabel', background="#f0f0f0")
     #     style.configure('Unsaved.TLabel', background="#fff9e6")
     #     style.configure('Saved.TLabel', background="#e6f7e6")
+
 
     def setup_styles(self):
         """Configure minimalistic flat design"""
@@ -3736,6 +4010,7 @@ class NetworkAnalyticsApplication:
         style.configure('TLabel', background='#ffffff', font=('Arial', 12))
         style.configure('Unsaved.TLabel', background='#fff3bf')
         style.configure('Saved.TLabel', background='#d3f9d8')
+
 
     def create_menu(self):
         """Create application menu bar"""
@@ -3797,6 +4072,7 @@ class NetworkAnalyticsApplication:
             if self.actors_bio_tab and self.session.active_actor_id:
                 self.actors_bio_tab.load_active_actor()
     
+
     def create_actor_id_tab(self):
         """Tab 1: Create Actor ID"""
         frame = ttk.Frame(self.notebook)
@@ -3893,7 +4169,6 @@ This actor ID is now ACTIVE for data entry.
         self.actor_id_born.insert(0, "00-1900")
         self.actor_id_source.delete(0, tk.END)
     
-
     def create_actors_tab(self):
         """Tab 2: Biographical Information"""
         frame = ttk.Frame(self.notebook)
@@ -3907,7 +4182,6 @@ This actor ID is now ACTIVE for data entry.
             db=self.db
         )
     
-
     def create_edges_tab(self):
         """Create Tab 3: Edges/Relationships tab"""
         edges_frame = ttk.Frame(self.notebook)
@@ -3935,10 +4209,9 @@ This actor ID is now ACTIVE for data entry.
             event_manager=self.event_manager,
             history_manager=self.history_manager,
             db=self.db
-    )
-    logger.info("Events tab created")
-    
-    
+        )
+        logger.info("Events tab created")
+        
 
     def create_participation_tab(self):
         """Tab 5: Create Participation tab"""
@@ -3951,58 +4224,22 @@ This actor ID is now ACTIVE for data entry.
             db=self.db
         )
     
-    logger.info("Participation tab created")
-    
+        logger.info("Participation tab created")
+
+ 
     def create_statistics_tab(self):
         """Tab 6: Statistics"""
-        frame = ttk.Frame(self.notebook)
-        self.notebook.add(frame, text="📊 Statistics")
+        stats_frame = ttk.Frame(self.notebook)
+        self.notebook.add(stats_frame, text="📊 Statistics")
+
+        self.stats_tab = StatsTab(
+            parent_frame=stats_frame,
+            root=self.root,              
+            db_path=DB_PATH,             
+            status_label=self.status_label
+        )
+        logger.info("Statistics tab created")
         
-        ttk.Button(frame, text="Compute Statistics", command=self.compute_statistics).pack(pady=10)
-        
-        self.stats_text = scrolledtext.ScrolledText(frame, height=25)
-        self.stats_text.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
-    
-    def compute_statistics(self):
-        """Compute and display database statistics"""
-        try:
-            self.stats_text.delete("1.0", tk.END)
-            
-            # Get counts
-            actors_id_count = self.db.execute_query("SELECT COUNT(*) as cnt FROM actors_id")[0]['cnt']
-            actors_records = self.db.execute_query("SELECT COUNT(*) as cnt FROM Actors")[0]['cnt']
-            aliases_count = self.db.execute_query("SELECT COUNT(*) as cnt FROM Actor_Aliases")[0]['cnt']
-            events_count = self.db.execute_query("SELECT COUNT(*) as cnt FROM Events")[0]['cnt']
-            participations = self.db.execute_query("SELECT COUNT(*) as cnt FROM Event_Participation")[0]['cnt']
-            
-            stats = f"""
-╔════════════════════════════════════════════════════════════╗
-║           DATABASE STATISTICS                              ║
-╚════════════════════════════════════════════════════════════╝
-
-👤 ACTORS:
-   • Unique Actor IDs: {actors_id_count}
-   • Biographical Records: {actors_records}
-   • Name Aliases: {aliases_count}
-
-📅 EVENTS:
-   • Total Events: {events_count}
-   • Event Participations: {participations}
-
-🔗 RELATIONSHIPS:
-   (To be computed)
-
-📊 QUALITY METRICS:
-   • Database File: {DB_PATH}
-   • Last Updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
-
-"""
-            self.stats_text.insert("1.0", stats)
-            self.update_status("✓ Statistics computed")
-            
-        except Exception as e:
-            logger.error(f"Error computing statistics: {e}")
-            messagebox.showerror("Error", str(e))
     
     def export_json(self):
         """Export data to JSON"""
